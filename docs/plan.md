@@ -308,6 +308,25 @@ in `NetfxLibvirt.ProtocolGen.Tests.csproj`), so every fixture path is just
 `AppContext.BaseDirectory` plus a fixed relative path, always correct
 because the build itself put the files there.
 
+**Image rebuild cost fix:** measured, not assumed — `ImageFromDockerfileBuilder`'s
+own default (confirmed by reading its source) is a fresh random image name
+plus `PullPolicy.Always` on every call, which guarantees a full rebuild
+(cold `apt-get install` and all) every single test run. `docker system df`
+showed 0B of build cache in use even across repeated runs on the same
+warm local Docker daemon — this was never just a CI concern, it was
+costing ~24 seconds on *every* local `dotnet test` too. Fixed by tagging
+the image with a SHA-256 hash of its own input files (`Dockerfile`,
+`entrypoint.sh`, `id_ecdsa.pub`) and building with `PullPolicy.Missing`:
+repeated runs with unchanged inputs reuse the cached image (measured
+24s → 4s), and any edit to those files changes the hash, so a stale image
+can never silently outlive a Dockerfile change — no manual `docker image
+rm` needed. A separate GitHub Action publishing this image to GHCR ahead
+of time (raised and considered) would help a *cold* CI runner's first
+build too, but adds real complexity (a new workflow, registry permissions,
+a staleness story for a PR that edits the Dockerfile before it's been
+published) for a project with no CI workflow yet at all — worth revisiting
+once CI exists and its actual cost is measured, not before.
+
 **Deliberately not done yet:** migrating `LibvirtdIntegrationTests` (the
 raw local Unix-socket transport, stories 6–10) to the same container
 approach. A Unix domain socket is a kernel object, not just a file — even

@@ -2,7 +2,11 @@
   <Folder Name="/src/">
     <Project Path="src/NetfxLibvirt/NetfxLibvirt.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/NetfxLibvirt.ProtocolGen/NetfxLibvirt.ProtocolGen.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/NetfxLibvirt.Tests/NetfxLibvirt.Tests.csproj" />
+    <Project Path="tests/NetfxLibvirt.ProtocolGen.Tests/NetfxLibvirt.ProtocolGen.Tests.csproj" />
   </Folder>
 </Solution>

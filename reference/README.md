@@ -38,6 +38,8 @@ ambiguous — algorithm reference only, never compiled or linked here.
 | `rpc.go` | [`174fc63`](https://github.com/digitalocean/go-libvirt/commit/174fc63aebd4ef790d76bc26e4c7840bc58803ac) | Call/reply/event routing shape. |
 | `socket/socket.go` | [`761cfee`](https://github.com/digitalocean/go-libvirt/commit/761cfeeb596863a450ad7e6f5fff373b82f3f4e3) | Confirmed the length-prefix semantics: the 4-byte `Len` field counts *itself* plus the header plus the payload (`packet{ Len uint32; Header }`, `p.Len = sizeof(Len)+sizeof(Header)+len(payload)`) — this is what `VirNetMessageFraming` in this repo implements. |
 | `socket/units.go` | (same package) | Size constants referenced alongside `socket.go`. |
+| `sunrpc.y` | [`1a83157`](https://github.com/digitalocean/go-libvirt/commit/1a83157e18586d0cd4638e102f0c48a1b1785040) (HEAD of a depth-1 clone taken 2026-09-16 — not necessarily the exact last-touching commit; refetch and re-resolve if precision matters) | The goyacc/LALR grammar for the SunRPC/XDR + RPCL `.x` language, from `internal/lvgen/`. Ground truth for `tools/NetfxLibvirt.ProtocolGen`'s hand-written recursive-descent `XdlParser` — same grammar, different parsing strategy (C# has no goyacc equivalent, and the grammar has no ambiguity that needs one). |
+| `lvlexer.go` | (same commit) | The lexer paired with `sunrpc.y` — a Rob Pike-style state-machine scanner. Ground truth for `XdlLexer`, including the `<PROGRAM>_PROC_<NAME>` procedure-identifier heuristic and the `%`-directive-line skip. |
 
 Refetch with:
 
@@ -45,4 +47,6 @@ Refetch with:
 curl -fsSL https://raw.githubusercontent.com/digitalocean/go-libvirt/main/rpc.go -o go-libvirt-src/rpc.go
 curl -fsSL https://raw.githubusercontent.com/digitalocean/go-libvirt/main/socket/socket.go -o go-libvirt-src/socket.go
 curl -fsSL https://raw.githubusercontent.com/digitalocean/go-libvirt/main/socket/units.go -o go-libvirt-src/units.go
+curl -fsSL https://raw.githubusercontent.com/digitalocean/go-libvirt/main/internal/lvgen/sunrpc.y -o go-libvirt-src/sunrpc.y
+curl -fsSL https://raw.githubusercontent.com/digitalocean/go-libvirt/main/internal/lvgen/lvlexer.go -o go-libvirt-src/lvlexer.go
 ```

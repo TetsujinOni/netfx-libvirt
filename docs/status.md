@@ -1,6 +1,6 @@
 # netfx-libvirt — Status
 
-**Last updated:** 2026-09-16 (plan stories 1–10 done, validated against a real libvirtd — see `docs/plan.md`)
+**Last updated:** 2026-09-16 (plan stories 1–10 done and validated against a real libvirtd; story 11 implemented, real-SSH validation pending — see `docs/plan.md`)
 
 ## What this is
 
@@ -46,23 +46,36 @@ Solution `netfx-libvirt.slnx` with four projects:
   - `Transport/UnixSocketTransport` — connects to a local libvirtd's Unix
     domain socket via `System.Net.Sockets.Socket` +
     `UnixDomainSocketEndPoint`. This project's first real transport.
+  - `Transport/SshTransport` — connects to a remote libvirtd over SSH,
+    built on **`Microsoft.DevTunnels.Ssh`** (Microsoft's own pure-managed
+    SSH2 client, chosen deliberately over SSH.NET/`Tmds.Ssh` for
+    supply-chain pedigree in this security-critical path — full reasoning
+    in `docs/plan.md` story 11). Doesn't replicate `virt-desktop`'s
+    `direct-streamlocal` channel-open; instead execs libvirt's own
+    `virt-ssh-helper <uri>` over a plain SSH exec channel — libvirt's own
+    official mechanism (confirmed by reading `src/remote/remote_ssh_helper.c`),
+    and the most universally-supported SSH capability there is. Requires an
+    explicit `VerifyHostKey` callback — no silent-trust default.
   - `ConnectListAllDomainsFlags`, `DomainState` — small hand-written enums
     for libvirt.h public API constants that have no entry in
     `remote_protocol.x` (same situation as `VIR_UUID_BUFLEN`, see
     `XdlConstantTable`'s doc), values cross-checked against go-libvirt's
     `const.gen.go`.
-- [`tests/NetfxLibvirt.Tests`](../tests/NetfxLibvirt.Tests) — xUnit v3, 120
-  tests. 114 are fully hermetic (no network, no real libvirtd) and always
+- [`tests/NetfxLibvirt.Tests`](../tests/NetfxLibvirt.Tests) — xUnit v3, 125
+  tests. 115 are fully hermetic (no network, no real libvirtd) and always
   run: every XDR primitive by byte-literal assertion *and* round-trip, the
   real `REMOTE_PROC_AUTH_LIST` call header byte-for-byte, message framing,
   the RPC call engine and every `LibvirtConnection` operation over a small
   fake duplex `Stream` (`Rpc/FakeDuplexStream`), and generated procedure
-  DTOs round-tripped through real `XdrWriter`/`XdrReader`. The remaining 6
-  (`Integration/LibvirtdIntegrationTests`) run against a **real libvirtd**
-  and are skipped by default (`Assert.Skip`, gated on the
-  `NETFX_LIBVIRT_TEST_SOCKET` env var) so the default `dotnet test` stays
-  100% reproducible with zero infrastructure on any contributor's machine —
-  see `docs/plan.md`'s transport section for how to run them for real.
+  DTOs round-tripped through real `XdrWriter`/`XdrReader`. The remaining 10
+  (`Integration/{LibvirtdIntegrationTests,SshLibvirtdIntegrationTests}`) run
+  against a **real libvirtd** (6 over a local Unix socket, 4 over real SSH)
+  and are skipped by default (`Assert.Skip`, gated on env vars) so the
+  default `dotnet test` stays 100% reproducible with zero infrastructure on
+  any contributor's machine — see `docs/plan.md`'s transport sections for
+  how to run them for real. The Unix-socket 6 have been run for real and
+  passed; the SSH 4 are written but not yet run for real (needs WSL's
+  `openssh-server`, an interactive `sudo` step — see `plan.md` story 11).
 - [`tools/NetfxLibvirt.ProtocolGen`](../tools/NetfxLibvirt.ProtocolGen) — the
   codegen tool, three layers:
   - `Lexing/XdlLexer` + `Parsing/XdlParser` — hand-written recursive-descent
@@ -148,6 +161,7 @@ Solution `netfx-libvirt.slnx` with four projects:
 | Auth + open handshake | `LibvirtConnection.OpenAsync` — `AUTH_LIST` then `CONNECT_OPEN`; rejects any auth mechanism besides `AuthNone` with a named `NotSupportedException` rather than guessing. |
 | Local Unix-socket transport | `Transport/UnixSocketTransport`. **This project's first connection to a real, running libvirtd** — see Validation below. |
 | Domain operations | `LibvirtConnection.{ListDomainsAsync,StartDomainAsync,ShutdownDomainAsync,DestroyDomainAsync,GetDomainXmlAsync,DisconnectAsync}` — full parity with `virt-desktop`'s `hypervisorAPI`. |
+| SSH transport | `Transport/SshTransport` on `Microsoft.DevTunnels.Ssh` — execs libvirt's own `virt-ssh-helper` over a plain SSH exec channel rather than replicating `virt-desktop`'s `direct-streamlocal` channel-open. Implemented; real-SSH validation pending (see below). |
 
 ## Validation so far
 
@@ -170,16 +184,29 @@ domains, get XML, destroy + restart with observed state transitions,
 disconnect, and a real unknown-domain error decoding into
 `LibvirtRpcException`.
 
+**SSH transport not yet run against real infrastructure.** `SshTransport`
+and `Integration/SshLibvirtdIntegrationTests` are written and the library
+build is clean, but the test suite needs `openssh-server` running in WSL,
+and installing it needs an interactive `sudo` password this session can't
+supply (a stuck earlier attempt was killed rather than left hanging — see
+`docs/plan.md` story 11). Until that test suite is actually run, this
+transport should be treated as **unvalidated against real infra**, per this
+project's own standard — API-shape-correct by construction (built directly
+against `Microsoft.DevTunnels.Ssh`'s real source, not guessed), but not yet
+proven.
+
 ## Next ready work
 
 See [`docs/plan.md`](plan.md) for the live backlog — a dependency-ordered
 list of small (2-point) stories. Stories 1–10 (parity codegen, RPC engine,
 and the full `LibvirtConnection` operation surface over a local Unix
-socket) are done and proven against a real libvirtd. Next: story 11, SSH
-transport via SSH.NET — matching `virt-desktop`'s actual deployment
-pattern, with a real research risk already flagged (an OpenSSH
-`direct-streamlocal` channel to a remote Unix socket, not a TCP
-port-forward). Broader `remote_protocol.x` coverage (toward go-libvirt-level
+socket) are done and proven against a real libvirtd. Story 11 (SSH
+transport, on `Microsoft.DevTunnels.Ssh`) is implemented but not yet
+validated against real infrastructure — install `openssh-server` in WSL
+(one manual `sudo` step) and run
+`Integration/SshLibvirtdIntegrationTests` to close that out. Then story 12,
+end-to-end validation against the real lab host — the actual parity
+finish line. Broader `remote_protocol.x` coverage (toward go-libvirt-level
 breadth) and the TCP/TLS transports come *after* that — see `plan.md`'s
 "After parity" section.
 

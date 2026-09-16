@@ -7,4 +7,10 @@
     <RootNamespace>NetfxLibvirt</RootNamespace>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Microsoft.DevTunnels.Ssh" Version="3.12.42" />
+    <PackageReference Include="Microsoft.DevTunnels.Ssh.Keys" Version="3.12.42" />
+    <PackageReference Include="Microsoft.DevTunnels.Ssh.Tcp" Version="3.12.42" />
+  </ItemGroup>
+
 </Project>

@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-16 (stories 1–10 done — validated against a real libvirtd)
+**Last updated:** 2026-09-16 (stories 1–10 done and validated against a real libvirtd; story 11 implemented, real-SSH validation pending a manual `sudo` step)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -207,16 +207,70 @@ Proven against the real daemon.
 
 ### Remote deployment — matching `virt-desktop`'s actual pattern
 
-**Status: next.**
+**Status: implemented, 2026-09-16; real-SSH validation pending (needs `sudo`, see below).**
 
-**11. SSH transport via SSH.NET.**
-The real research risk flagged above: `virt-desktop` doesn't port-forward
-TCP, it opens an OpenSSH `direct-streamlocal` channel straight to the remote
-Unix socket path. Confirm SSH.NET (`Renci.SshNet`) exposes that channel
-type before assuming the API shape — if it doesn't, the fallback is opening
-the channel type manually against SSH.NET's lower-level primitives. Resolve
-this **first**, before writing the story's implementation, since it changes
-the shape of everything else in it.
+**11. SSH transport.** Superseded the original SSH.NET assumption after two
+rounds of research:
+
+1. The flagged research risk was real: `virt-desktop` opens an OpenSSH
+   `direct-streamlocal` channel straight to the remote Unix socket
+   (`golang.org/x/crypto/ssh`'s `Client.Dial("unix", ...)`). Checked three
+   candidate libraries against that specific requirement: SSH.NET has no
+   native support for it; **`Microsoft.DevTunnels.Ssh`** (Microsoft's own
+   pure-managed SSH2 client/server, used in VS Code Remote / Dev Tunnels)
+   doesn't either — confirmed by a zero-hit GitHub code search for
+   `streamlocal` across its whole repo, and zero issues ever mentioning it;
+   **`Tmds.Ssh`** (an independent, modern, AOT-native library) does, via a
+   first-class `OpenUnixConnectionAsync` API.
+2. Before picking a library around that one feature, checked whether
+   `direct-streamlocal` is actually required at all — it isn't. Read
+   libvirt's own `src/remote/remote_ssh_helper.c` (vendored in this
+   session's reference clone): libvirt's **own official SSH transport**
+   doesn't use `direct-streamlocal` either. It execs `virt-ssh-helper <uri>`
+   over a plain SSH **exec** channel; the helper connects to the local
+   libvirt socket and relays raw bytes over its own stdin/stdout — no
+   framing, no handshake. (Confirmed present on the WSL validation host:
+   `virt-ssh-helper (libvirt) 8.0.0`.) This is the same shape as how Docker
+   reaches a remote daemon over SSH (`docker system dial-stdio`, also a
+   plain exec channel) — `virt-desktop`'s `Dial("unix", ...)` is a
+   Go-library convenience shortcut to the same destination, not the
+   canonical mechanism.
+
+Since a plain SSH `exec` channel is the most universally-supported SSH
+client capability there is, the missing-feature objection to
+`Microsoft.DevTunnels.Ssh` no longer applies, and it's the library used:
+Microsoft-maintained, pure-managed (no P/Invoke, same requirement as
+everything else in this project), used in production. In a
+security-critical, supply-chain-conscious context, that pedigree was judged
+to outweigh `Tmds.Ssh`'s more modern (AOT-native) design and narrower
+maintainer base (242 stars) — an explicit, deliberate tradeoff, not a
+default.
+
+Implementation: `Transport/{SshTransport,SshTransportOptions,SshHostKeyVerifier,SshHostKeyVerifiers,SshTransportException}`.
+`SshTransport.ConnectAsync` opens an `SshClientSession`, requires the
+caller to supply a `VerifyHostKey` callback (no silent-trust default —
+deliberately unlike `virt-desktop`'s own `connection.go`, which uses
+`ssh.InsecureIgnoreHostKey()` with an unresolved "configure this properly
+in production" comment; `SshHostKeyVerifiers.DangerousAcceptAny` exists for
+lab use only, named loudly on purpose), authenticates with password or a
+private-key file (matching `virt-desktop`'s `SSHConnectionParams`; SSH-agent
+support not included yet), execs `virt-ssh-helper <uri>`, and returns the
+channel wrapped as a `Stream` (`SshStream`, provided by the library) —
+which plugs straight into the already-proven `LibvirtConnection.OpenAsync`
+unchanged, since everything from story 4 onward was built transport-agnostic
+from the start.
+
+Real-SSH validation (`tests/NetfxLibvirt.Tests/Integration/SshLibvirtdIntegrationTests.cs`,
+same skip-by-default-via-env-var pattern as the Unix-socket integration
+tests) is written but **not yet run for real** — it needs WSL's
+`openssh-server`, and installing it requires an interactive `sudo` password
+this session can't supply. Run once, by hand, inside WSL:
+```bash
+sudo apt-get install -y openssh-server
+sudo systemctl enable --now ssh
+```
+then run the test suite with `NETFX_LIBVIRT_SSH_HOST`/`_USER`/`_PRIVATE_KEY_PATH`
+(or `_PASSWORD`) set — see that test class's own doc for the exact command.
 
 **12. End-to-end validation against the real lab host.**
 Full `Connect → ListDomains → Start/Shutdown/Destroy → GetDomainXml →

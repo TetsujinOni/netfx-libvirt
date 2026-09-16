@@ -27,6 +27,37 @@ curl -fsSL https://raw.githubusercontent.com/libvirt/libvirt/master/src/rpc/virn
 curl -fsSL https://raw.githubusercontent.com/libvirt/libvirt/master/src/remote/remote_protocol.x -o upstream-x/remote_protocol.x
 ```
 
+### Compatibility bisection: master vs. libvirt v8.0.0 (2026-09-16)
+
+Why: our WSL validation environment (`docs/plan.md` story 6) runs libvirt
+8.0.0 — the version Ubuntu 22.04 LTS ships, and a reasonable proxy for the
+oldest still-common enterprise fleet member this project needs to not have
+quirks against. Rather than assume master-vendored `.x` files are safe to
+validate against an older real daemon, diffed both files against the real
+[`v8.0.0` tag](https://github.com/libvirt/libvirt/tree/v8.0.0):
+
+- `virnetprotocol.x`: **byte-identical**. The framing/header layer every
+  transport depends on hasn't changed at all since 8.0.0.
+- `remote_protocol.x`: 254 added lines / 11 changed lines over ~4 years.
+  The additions are new procedures appended at the end
+  (`REMOTE_PROC_DOMAIN_SAVE_PARAMS` = 440 onward) plus a few new `const`s
+  and doc/ACL-annotation additions to existing procedures' metadata
+  comments — never a renumbering. The 11 changed lines are all the same
+  field rename (`unsigned hyper resource;` → `bandwidth;`, same type),
+  confined to `remote_domain_migrate_*` structs. **Zero changes anywhere
+  touch any procedure or struct this project currently generates**
+  (`src/NetfxLibvirt/Generated/Remote`).
+
+Conclusion: libvirt's RPC procedures are additive-only and never
+renumbered/removed — there's no real "pick an old vs. new baseline"
+tradeoff, since master is a strict superset of what an 8.0.0-era daemon
+needs. The actual compatibility risk is calling a procedure a specific
+daemon doesn't implement *yet* (something newer than what it ships), which
+libvirt itself surfaces as an ordinary `VIR_NET_ERROR` reply — exactly what
+`LibvirtRpcException`/`RemoteError` already decode. The design implication:
+treat "unknown procedure" as an expected, catchable failure mode as the
+emitted surface grows, not something to version-pin around.
+
 ## `go-libvirt-src/`
 
 Individual files mirrored from `digitalocean/go-libvirt@main` (Apache 2.0),

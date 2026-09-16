@@ -128,18 +128,42 @@ hermetic fake-stream test approach as story 4 (`LibvirtConnectionTests`).
 
 ### Transport — first real-libvirtd proof
 
-**Status: next.** Everything above (stories 1–5) was provable hermetically —
-no real infrastructure needed. Story 6 onward needs an actual reachable
-libvirtd (WSL first, per the existing plan) to validate against, which is
-environment-dependent in a way the stories so far weren't; confirm that
-access before starting story 6 rather than assuming it.
+**Status: next; environment confirmed ready, 2026-09-16.** Everything above
+(stories 1–5) was provable hermetically. Story 6 onward needs an actual
+reachable libvirtd — checked directly rather than assumed:
+
+- WSL2 Ubuntu 22.04 already has `libvirtd` 8.0.0 running, the calling user
+  in the `libvirt` group (`auth_unix_rw = "none"` — matches
+  `LibvirtConnection.OpenAsync`'s `AuthNone`-only support, no lab
+  credentials needed), and KVM/nested-virt confirmed working. No package
+  provisioning needed.
+- Per the open-source-independence requirement (this project must stay
+  reproducible by any contributor, not depend on the maintainer's private
+  lab): **`test:///default`** — libvirt's built-in null-hypervisor driver,
+  already present with a running fake domain, real RPC traffic over a real
+  Unix socket, zero virtualization capability required — is the intended
+  validation target for this story and stories 7–10's own tests, not
+  `qemu:///system`. Real qemu+KVM is available in this WSL instance too and
+  fine for the maintainer's own manual sanity pass, but nothing committed
+  should depend on it existing. A lab account is not needed for any of
+  stories 6–10.
+- Compatibility with an 8.0.0-era daemon specifically (not just "some
+  libvirtd") was verified by diffing the real `v8.0.0` tag against our
+  vendored master `.x` files — see `reference/README.md`'s "Compatibility
+  bisection" section. Zero changes touch anything this project generates;
+  the WSL daemon is a safe, and genuinely representative (Ubuntu 22.04 LTS,
+  broadly deployed), validation target. Follow-on design implication for
+  later stories: treat an "unknown procedure" `VIR_NET_ERROR` reply as an
+  expected, catchable case (`LibvirtRpcException`) once the emitted surface
+  grows past what an old fleet member supports — not something to
+  version-pin the vendored `.x` files around.
 
 **6. Local Unix-socket transport.**
 `UnixSocketTransport` over `System.Net.Sockets.Socket` +
 `UnixDomainSocketEndPoint` (supported on both Windows 10+ and Linux — no
 platform shim needed). **First point this project validates against a real
-libvirtd** (WSL, per `docs/status.md`'s existing plan) — connect + auth +
-open, nothing more yet.
+libvirtd** — connect + auth + open against `test:///default` over WSL's
+Unix socket, nothing more yet.
 
 **7. `ListDomains()`.**
 `ConnectListAllDomains(1, 3)` + a `DomainGetState` call per returned domain,

@@ -295,6 +295,19 @@ supports RSA/ECDSA — every test failed with a clear
 all 4 tests then passed against the real, freshly-built container: open,
 list domains (finds the seeded `test` domain), get its XML, disconnect.
 
+**Fixture-location fix:** the container fixture (and, retrofitted for
+consistency, `RealProtocolFileTests`/`RealModuleTests` in
+`NetfxLibvirt.ProtocolGen.Tests`) originally located their on-disk fixture
+data by walking up from `AppContext.BaseDirectory` looking for
+`netfx-libvirt.slnx`. Flagged as a known-fragile pattern (it assumes the
+source tree ships alongside the test binaries — breaks for a published
+test payload, sharded CI, etc.) — switched to build-time
+`CopyToOutputDirectory` instead (`<None Update="Integration\docker\**" ...>`
+in `NetfxLibvirt.Tests.csproj`; `<None Include="..\..\reference\upstream-x\*.x" Link="...">`
+in `NetfxLibvirt.ProtocolGen.Tests.csproj`), so every fixture path is just
+`AppContext.BaseDirectory` plus a fixed relative path, always correct
+because the build itself put the files there.
+
 **Deliberately not done yet:** migrating `LibvirtdIntegrationTests` (the
 raw local Unix-socket transport, stories 6–10) to the same container
 approach. A Unix domain socket is a kernel object, not just a file — even

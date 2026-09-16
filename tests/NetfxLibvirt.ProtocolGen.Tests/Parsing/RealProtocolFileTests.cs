@@ -12,22 +12,12 @@ namespace NetfxLibvirt.ProtocolGen.Tests.Parsing;
 /// </summary>
 public class RealProtocolFileTests
 {
-    private static string RepoRoot
-    {
-        get
-        {
-            var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "netfx-libvirt.slnx")))
-            {
-                dir = dir.Parent;
-            }
-
-            return dir?.FullName ?? throw new InvalidOperationException("could not locate repo root (netfx-libvirt.slnx) above " + AppContext.BaseDirectory);
-        }
-    }
-
+    // Copied here at build time (see this project's .csproj), not located by
+    // walking up from AppContext.BaseDirectory looking for the repo root —
+    // that breaks whenever the source tree isn't checked out alongside the
+    // test binaries.
     private static string ReadUpstreamFile(string name) =>
-        File.ReadAllText(Path.Combine(RepoRoot, "reference", "upstream-x", name));
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "reference", "upstream-x", name));
 
     [Fact]
     public void Parse_VirNetProtocolX_Succeeds()

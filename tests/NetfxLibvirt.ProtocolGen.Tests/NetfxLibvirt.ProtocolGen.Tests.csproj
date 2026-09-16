@@ -23,4 +23,14 @@
     <ProjectReference Include="..\..\tools\NetfxLibvirt.ProtocolGen\NetfxLibvirt.ProtocolGen.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Real-file tests read these next to the test DLL, copied at build
+         time rather than located by walking up from the output directory
+         at runtime — see the same reasoning in NetfxLibvirt.Tests.csproj's
+         Integration\docker copy. Link controls the destination path since
+         the source lives outside this project's own directory. -->
+    <None Include="..\..\reference\upstream-x\virnetprotocol.x" Link="reference\upstream-x\virnetprotocol.x" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\reference\upstream-x\remote_protocol.x" Link="reference\upstream-x\remote_protocol.x" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

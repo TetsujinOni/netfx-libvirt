@@ -24,4 +24,16 @@
     <ProjectReference Include="..\..\src\NetfxLibvirt\NetfxLibvirt.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The container fixture needs these as real files on disk next to the
+         test DLL (Testcontainers builds from an actual directory) — copied
+         at build time rather than located by walking up from the output
+         directory at runtime, which breaks whenever the source tree isn't
+         checked out alongside the test binaries (a published test payload,
+         sharded CI where only bin/ propagates, etc.). Already implicitly
+         included by the SDK's default globs as plain <None> items; this
+         just adds the copy-to-output metadata. -->
+    <None Update="Integration\docker\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

@@ -10,23 +10,13 @@ namespace NetfxLibvirt.ProtocolGen.Tests.Semantics;
 /// file, not a hand-picked snippet.</summary>
 public class RealModuleTests
 {
-    private static string RepoRoot
-    {
-        get
-        {
-            var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "netfx-libvirt.slnx")))
-            {
-                dir = dir.Parent;
-            }
-
-            return dir?.FullName ?? throw new InvalidOperationException("could not locate repo root above " + AppContext.BaseDirectory);
-        }
-    }
-
+    // Copied here at build time (see this project's .csproj), not located by
+    // walking up from AppContext.BaseDirectory looking for the repo root —
+    // that breaks whenever the source tree isn't checked out alongside the
+    // test binaries.
     private static XdlModule BuildRemoteProtocolModule()
     {
-        var path = Path.Combine(RepoRoot, "reference", "upstream-x", "remote_protocol.x");
+        var path = Path.Combine(AppContext.BaseDirectory, "reference", "upstream-x", "remote_protocol.x");
         return XdlModuleBuilder.Build(XdlParser.Parse(File.ReadAllText(path)));
     }
 

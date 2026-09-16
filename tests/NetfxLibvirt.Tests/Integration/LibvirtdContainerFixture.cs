@@ -35,16 +35,22 @@ public sealed class LibvirtdContainerFixture : IAsyncLifetime
     // ed25519 test key failed every one of these tests with
     // "No OpenSSH importer available for key algorithm: ssh-ed25519"
     // before this was caught and fixed.
-    public string PrivateKeyPath { get; } = Path.Combine(FindDockerDirectory(), "id_ecdsa");
+    public string PrivateKeyPath { get; } = Path.Combine(DockerDirectory, "id_ecdsa");
+
+    // Copied here at build time (see this project's .csproj: <None Update="Integration\docker\**"
+    // CopyToOutputDirectory="PreserveNewest" />), not located by walking up
+    // from AppContext.BaseDirectory looking for the repo root — that breaks
+    // whenever the source tree isn't checked out alongside the test
+    // binaries (a published test payload, sharded CI, etc.). This path is
+    // always correct because the build itself put the files here.
+    private static string DockerDirectory { get; } = Path.Combine(AppContext.BaseDirectory, "Integration", "docker");
 
     public async ValueTask InitializeAsync()
     {
         try
         {
-            var dockerDirectory = FindDockerDirectory();
-
             var image = new ImageFromDockerfileBuilder()
-                .WithDockerfileDirectory(dockerDirectory)
+                .WithDockerfileDirectory(DockerDirectory)
                 .WithDockerfile("Dockerfile")
                 .Build();
             await image.CreateAsync().ConfigureAwait(false);
@@ -69,18 +75,6 @@ public sealed class LibvirtdContainerFixture : IAsyncLifetime
         }
     }
 
-    private static string FindDockerDirectory()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "netfx-libvirt.slnx")))
-        {
-            dir = dir.Parent;
-        }
-
-        var repoRoot = dir?.FullName
-            ?? throw new InvalidOperationException("could not locate repo root (netfx-libvirt.slnx) above " + AppContext.BaseDirectory);
-        return Path.Combine(repoRoot, "tests", "NetfxLibvirt.Tests", "Integration", "docker");
-    }
 }
 
 [CollectionDefinition(nameof(LibvirtdContainerCollection))]

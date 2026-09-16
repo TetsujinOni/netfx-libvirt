@@ -97,6 +97,49 @@ public static class CSharpTypeEmitter
         return RenderFile(enumDeclaration, $"libvirt's `enum {definition.Name}` (remote_protocol.x)");
     }
 
+    /// <summary>Emits a plain enum mapping every procedure in
+    /// <paramref name="procedures"/> to its wire number, so call sites never
+    /// hardcode a <c>REMOTE_PROC_*</c> magic number into
+    /// <c>VirNetMessageHeader.Proc</c>. Deliberately takes the full
+    /// procedure list (every entry <see cref="XdlModuleBuilder"/> found in a
+    /// <c>*_PROC_*</c> enum), not just the ones with generated args/ret
+    /// DTOs — most procedures a caller might want to invoke by number won't
+    /// have a DTO yet, and that's fine; this registry doesn't depend on one
+    /// existing.</summary>
+    public static string EmitProcedureRegistry(IReadOnlyList<XdlProcedure> procedures, string enumName)
+    {
+        var members = procedures
+            .OrderBy(p => p.Number)
+            .Select(p => EnumMemberDeclaration(CSharpNaming.ToPascalCase(p.Name))
+                .WithEqualsValue(EqualsValueClause(LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(checked((int)p.Number))))));
+
+        var enumDeclaration = EnumDeclaration(enumName)
+            .AddModifiers(Token(SyntaxKind.PublicKeyword))
+            .AddMembers(members.ToArray());
+
+        return RenderFile(enumDeclaration, "every `*_PROC_*` enum value across remote_protocol.x");
+    }
+
+    /// <summary>Emits a small static class of <c>long</c> constants —
+    /// currently just <c>REMOTE_PROGRAM</c>/<c>REMOTE_PROTOCOL_VERSION</c>,
+    /// which the RPC call engine needs for every <c>VirNetMessageHeader</c>
+    /// it builds. Values come from <see cref="XdlConstantTable"/>, already
+    /// folded from the real file — not re-typed by hand.</summary>
+    public static string EmitConstants(IReadOnlyList<(string Name, long Value)> constants, string className)
+    {
+        var members = constants.Select(c => (MemberDeclarationSyntax)FieldDeclaration(
+                VariableDeclaration(PredefinedType(Token(SyntaxKind.LongKeyword)))
+                    .AddVariables(VariableDeclarator(CSharpNaming.ToPascalCase(c.Name))
+                        .WithInitializer(EqualsValueClause(LiteralExpression(SyntaxKind.NumericLiteralExpression, Literal(c.Value))))))
+            .AddModifiers(Token(SyntaxKind.PublicKeyword), Token(SyntaxKind.ConstKeyword)));
+
+        var classDeclaration = ClassDeclaration(className)
+            .AddModifiers(Token(SyntaxKind.PublicKeyword), Token(SyntaxKind.StaticKeyword))
+            .AddMembers(members.ToArray());
+
+        return RenderFile(classDeclaration, "selected `const` definitions in remote_protocol.x");
+    }
+
     private static PropertyDeclarationSyntax BuildProperty(string propertyName, string typeText)
     {
         var getAccessor = AccessorDeclaration(SyntaxKind.GetAccessorDeclaration).WithSemicolonToken(Token(SyntaxKind.SemicolonToken));

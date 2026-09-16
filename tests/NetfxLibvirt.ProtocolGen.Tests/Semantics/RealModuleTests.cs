@@ -32,12 +32,15 @@ public class RealModuleTests
 
     [Theory]
     [InlineData("REMOTE_PROC_CONNECT_OPEN", "remote_connect_open_args", null)]
+    [InlineData("REMOTE_PROC_CONNECT_CLOSE", null, null)]
     [InlineData("REMOTE_PROC_CONNECT_GET_CAPABILITIES", null, "remote_connect_get_capabilities_ret")]
     [InlineData("REMOTE_PROC_DOMAIN_GET_XML_DESC", "remote_domain_get_xml_desc_args", "remote_domain_get_xml_desc_ret")]
+    [InlineData("REMOTE_PROC_DOMAIN_LOOKUP_BY_NAME", "remote_domain_lookup_by_name_args", "remote_domain_lookup_by_name_ret")]
     [InlineData("REMOTE_PROC_DOMAIN_DESTROY", "remote_domain_destroy_args", null)]
     [InlineData("REMOTE_PROC_DOMAIN_SHUTDOWN", "remote_domain_shutdown_args", null)]
     [InlineData("REMOTE_PROC_DOMAIN_CREATE", "remote_domain_create_args", null)]
     [InlineData("REMOTE_PROC_DOMAIN_GET_INFO", "remote_domain_get_info_args", "remote_domain_get_info_ret")]
+    [InlineData("REMOTE_PROC_DOMAIN_GET_STATE", "remote_domain_get_state_args", "remote_domain_get_state_ret")]
     [InlineData("REMOTE_PROC_AUTH_LIST", null, "remote_auth_list_ret")]
     [InlineData("REMOTE_PROC_CONNECT_LIST_ALL_DOMAINS", "remote_connect_list_all_domains_args", "remote_connect_list_all_domains_ret")]
     public void MvpProcedure_ResolvesExpectedArgsAndRetStructNames(string procName, string? expectedArgs, string? expectedRet)
@@ -107,10 +110,12 @@ public class RealModuleTests
         var module = BuildRemoteProtocolModule();
         string[] mvpProcedures =
         [
-            "REMOTE_PROC_CONNECT_OPEN", "REMOTE_PROC_CONNECT_GET_CAPABILITIES",
-            "REMOTE_PROC_DOMAIN_GET_XML_DESC", "REMOTE_PROC_DOMAIN_DESTROY",
-            "REMOTE_PROC_DOMAIN_SHUTDOWN", "REMOTE_PROC_DOMAIN_CREATE",
-            "REMOTE_PROC_DOMAIN_GET_INFO", "REMOTE_PROC_AUTH_LIST",
+            "REMOTE_PROC_CONNECT_OPEN", "REMOTE_PROC_CONNECT_CLOSE",
+            "REMOTE_PROC_CONNECT_GET_CAPABILITIES",
+            "REMOTE_PROC_DOMAIN_GET_XML_DESC", "REMOTE_PROC_DOMAIN_LOOKUP_BY_NAME",
+            "REMOTE_PROC_DOMAIN_DESTROY", "REMOTE_PROC_DOMAIN_SHUTDOWN",
+            "REMOTE_PROC_DOMAIN_CREATE", "REMOTE_PROC_DOMAIN_GET_INFO",
+            "REMOTE_PROC_DOMAIN_GET_STATE", "REMOTE_PROC_AUTH_LIST",
             "REMOTE_PROC_CONNECT_LIST_ALL_DOMAINS",
         ];
 
@@ -129,6 +134,31 @@ public class RealModuleTests
                     XdlTypeResolver.ResolveDeclaration(field, module);
                 }
             }
+        }
+    }
+
+    [Fact]
+    public void RemoteError_EveryFieldResolves_IncludingOptionalNestedStructs()
+    {
+        // remote_error is every VIR_NET_ERROR reply's payload (plan.md story
+        // 2) — not any procedure's own args/ret struct, so it isn't covered
+        // by the sweep above. Its `dom`/`net` fields are optional structs
+        // (pointer typedefs to remote_nonnull_domain/remote_nonnull_network)
+        // reached this way for the first time in this project.
+        var module = BuildRemoteProtocolModule();
+        var error = module.Structs["remote_error"];
+
+        var domShape = XdlTypeResolver.ResolveDeclaration(error.Fields.Single(f => f.Name == "dom"), module);
+        var domOptional = Assert.IsType<XdlOptionalShape>(domShape);
+        Assert.Equal("remote_nonnull_domain", Assert.IsType<XdlStructShape>(domOptional.Inner).Definition.Name);
+
+        var netShape = XdlTypeResolver.ResolveDeclaration(error.Fields.Single(f => f.Name == "net"), module);
+        var netOptional = Assert.IsType<XdlOptionalShape>(netShape);
+        Assert.Equal("remote_nonnull_network", Assert.IsType<XdlStructShape>(netOptional.Inner).Definition.Name);
+
+        foreach (var field in error.Fields)
+        {
+            XdlTypeResolver.ResolveDeclaration(field, module);
         }
     }
 }

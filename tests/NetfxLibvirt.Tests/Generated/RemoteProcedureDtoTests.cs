@@ -129,4 +129,119 @@ public class RemoteProcedureDtoTests
         Assert.Equal("vm2", decoded.Domains[1].Name);
         Assert.Equal(2u, decoded.Ret);
     }
+
+    [Fact]
+    public void RemoteDomainLookupByName_RoundTrips()
+    {
+        var args = new RemoteDomainLookupByNameArgs { Name = "test-vm" };
+        var writer = new XdrWriter();
+        args.Encode(writer);
+        var decodedArgs = RemoteDomainLookupByNameArgs.Decode(new XdrReader(writer.ToArray()));
+        Assert.Equal("test-vm", decodedArgs.Name);
+
+        var ret = new RemoteDomainLookupByNameRet
+        {
+            Dom = new RemoteNonnullDomain { Name = "test-vm", Uuid = new byte[16], Id = 7 },
+        };
+        writer = new XdrWriter();
+        ret.Encode(writer);
+        var decodedRet = RemoteDomainLookupByNameRet.Decode(new XdrReader(writer.ToArray()));
+        Assert.Equal("test-vm", decodedRet.Dom.Name);
+        Assert.Equal(7, decodedRet.Dom.Id);
+    }
+
+    [Fact]
+    public void RemoteDomainGetState_RoundTrips()
+    {
+        var args = new RemoteDomainGetStateArgs
+        {
+            Dom = new RemoteNonnullDomain { Name = "test-vm", Uuid = new byte[16], Id = 1 },
+            Flags = 0,
+        };
+        var writer = new XdrWriter();
+        args.Encode(writer);
+        var decodedArgs = RemoteDomainGetStateArgs.Decode(new XdrReader(writer.ToArray()));
+        Assert.Equal("test-vm", decodedArgs.Dom.Name);
+
+        // VIR_DOMAIN_RUNNING = 1, reason VIR_DOMAIN_RUNNING_BOOTED = 1 — real
+        // libvirt values, not arbitrary test data.
+        var ret = new RemoteDomainGetStateRet { State = 1, Reason = 1 };
+        writer = new XdrWriter();
+        ret.Encode(writer);
+        var decodedRet = RemoteDomainGetStateRet.Decode(new XdrReader(writer.ToArray()));
+        Assert.Equal(1, decodedRet.State);
+        Assert.Equal(1, decodedRet.Reason);
+    }
+
+    [Fact]
+    public void RemoteError_AllFieldsAbsent_RoundTrips()
+    {
+        var error = new RemoteError
+        {
+            Code = 0,
+            Domain = 0,
+            Message = null,
+            Level = 0,
+            Dom = null,
+            Str1 = null,
+            Str2 = null,
+            Str3 = null,
+            Int1 = 0,
+            Int2 = 0,
+            Net = null,
+        };
+
+        var writer = new XdrWriter();
+        error.Encode(writer);
+        var decoded = RemoteError.Decode(new XdrReader(writer.ToArray()));
+
+        Assert.Null(decoded.Message);
+        Assert.Null(decoded.Dom);
+        Assert.Null(decoded.Net);
+    }
+
+    [Fact]
+    public void RemoteError_WithMessageAndDomain_RoundTrips()
+    {
+        // Shape a real VIR_ERR_OPERATION_INVALID-style reply might take:
+        // message present, the offending domain identified, network absent.
+        var error = new RemoteError
+        {
+            Code = 55,
+            Domain = 10,
+            Message = "domain is not running",
+            Level = 2,
+            Dom = new RemoteNonnullDomain { Name = "test-vm", Uuid = new byte[16], Id = 3 },
+            Str1 = null,
+            Str2 = null,
+            Str3 = null,
+            Int1 = 0,
+            Int2 = 0,
+            Net = null,
+        };
+
+        var writer = new XdrWriter();
+        error.Encode(writer);
+        var decoded = RemoteError.Decode(new XdrReader(writer.ToArray()));
+
+        Assert.Equal(55, decoded.Code);
+        Assert.Equal("domain is not running", decoded.Message);
+        Assert.NotNull(decoded.Dom);
+        Assert.Equal("test-vm", decoded.Dom!.Name);
+        Assert.Null(decoded.Net);
+    }
+
+    [Fact]
+    public void RemoteProcedure_KnownValues_MatchRealProtocolNumbers()
+    {
+        // Spot-check against the same numbers the raw grammar/semantic layer
+        // tests lock in independently (RealProtocolFileTests,
+        // RealModuleTests) — this is the generated enum a real RPC call site
+        // will actually use for VirNetMessageHeader.Proc.
+        Assert.Equal(1, (int)RemoteProcedure.RemoteProcConnectOpen);
+        Assert.Equal(2, (int)RemoteProcedure.RemoteProcConnectClose);
+        Assert.Equal(23, (int)RemoteProcedure.RemoteProcDomainLookupByName);
+        Assert.Equal(212, (int)RemoteProcedure.RemoteProcDomainGetState);
+        Assert.Equal(273, (int)RemoteProcedure.RemoteProcConnectListAllDomains);
+    }
 }

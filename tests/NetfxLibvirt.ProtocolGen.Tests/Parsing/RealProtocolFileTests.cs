@@ -76,18 +76,22 @@ public class RealProtocolFileTests
         Assert.Equal("1", protocolVersion.Value);
     }
 
-    // The MVP procedure set from docs/status.md, confirmed by hand against the
-    // real remote_protocol.x when that doc was written — re-verified here so a
-    // future upstream refresh (see reference/README.md) can't silently drift
-    // one of these without a test failure.
+    // The virt-desktop parity procedure set from docs/plan.md, confirmed by
+    // hand against the real remote_protocol.x when that doc was written —
+    // re-verified here so a future upstream refresh (see
+    // reference/README.md) can't silently drift one of these without a test
+    // failure.
     [Theory]
     [InlineData("REMOTE_PROC_CONNECT_OPEN", "1")]
+    [InlineData("REMOTE_PROC_CONNECT_CLOSE", "2")]
     [InlineData("REMOTE_PROC_CONNECT_GET_CAPABILITIES", "7")]
     [InlineData("REMOTE_PROC_DOMAIN_GET_XML_DESC", "14")]
+    [InlineData("REMOTE_PROC_DOMAIN_LOOKUP_BY_NAME", "23")]
     [InlineData("REMOTE_PROC_DOMAIN_DESTROY", "12")]
     [InlineData("REMOTE_PROC_DOMAIN_SHUTDOWN", "33")]
     [InlineData("REMOTE_PROC_DOMAIN_CREATE", "9")]
     [InlineData("REMOTE_PROC_DOMAIN_GET_INFO", "16")]
+    [InlineData("REMOTE_PROC_DOMAIN_GET_STATE", "212")]
     [InlineData("REMOTE_PROC_AUTH_LIST", "66")]
     [InlineData("REMOTE_PROC_CONNECT_LIST_ALL_DOMAINS", "273")]
     public void Parse_RemoteProtocolX_MvpProcedure_HasExpectedNumber(string procName, string expectedValue)

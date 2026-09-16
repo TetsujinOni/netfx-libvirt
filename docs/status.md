@@ -1,6 +1,6 @@
 # netfx-libvirt — Status
 
-**Last updated:** 2026-09-16 (plan stories 1–5 done — see `docs/plan.md`)
+**Last updated:** 2026-09-16 (plan stories 1–10 done, validated against a real libvirtd — see `docs/plan.md`)
 
 ## What this is
 
@@ -36,19 +36,33 @@ Solution `netfx-libvirt.slnx` with four projects:
     `Reply`, and either returns the raw payload or throws
     `Rpc/LibvirtRpcException` (decoded from the generated `RemoteError` DTO)
     on a `VIR_NET_ERROR` reply. Half-duplex by design — see its class doc.
-  - `LibvirtConnection.OpenAsync` — the AUTH_LIST + CONNECT_OPEN handshake
-    every libvirt client needs, over any already-connected `Stream`. Only
-    `RemoteAuthType.RemoteAuthNone` is supported so far (throws
-    `NotSupportedException` naming what libvirtd actually offered
-    otherwise) — matches every transport this parity milestone needs.
-- [`tests/NetfxLibvirt.Tests`](../tests/NetfxLibvirt.Tests) — xUnit v3, 105
-  tests, all passing, fully hermetic (no network, no real libvirtd). Covers
-  every XDR primitive by byte-literal assertion *and* round-trip, the real
-  `REMOTE_PROC_AUTH_LIST` call header byte-for-byte, message framing
-  (length-prefix math, multi-frame streams, truncation, oversized-payload
-  rejection), the RPC call engine and connection handshake over a small fake
-  duplex `Stream` (`Rpc/FakeDuplexStream`), and a sample of the generated
-  procedure DTOs round-tripped through real `XdrWriter`/`XdrReader`.
+  - `LibvirtConnection` — the full session surface, deliberately matching
+    `virt-desktop`'s own `hypervisorAPI` interface (`hypervisor.go`):
+    `OpenAsync` (AUTH_LIST + CONNECT_OPEN; only `AuthNone` supported, named
+    `NotSupportedException` otherwise), `ListDomainsAsync`,
+    `StartDomainAsync`/`ShutdownDomainAsync`/`DestroyDomainAsync`,
+    `GetDomainXmlAsync`, `DisconnectAsync` (graceful `CONNECT_CLOSE`,
+    idempotent), and a best-effort `DisposeAsync`.
+  - `Transport/UnixSocketTransport` — connects to a local libvirtd's Unix
+    domain socket via `System.Net.Sockets.Socket` +
+    `UnixDomainSocketEndPoint`. This project's first real transport.
+  - `ConnectListAllDomainsFlags`, `DomainState` — small hand-written enums
+    for libvirt.h public API constants that have no entry in
+    `remote_protocol.x` (same situation as `VIR_UUID_BUFLEN`, see
+    `XdlConstantTable`'s doc), values cross-checked against go-libvirt's
+    `const.gen.go`.
+- [`tests/NetfxLibvirt.Tests`](../tests/NetfxLibvirt.Tests) — xUnit v3, 120
+  tests. 114 are fully hermetic (no network, no real libvirtd) and always
+  run: every XDR primitive by byte-literal assertion *and* round-trip, the
+  real `REMOTE_PROC_AUTH_LIST` call header byte-for-byte, message framing,
+  the RPC call engine and every `LibvirtConnection` operation over a small
+  fake duplex `Stream` (`Rpc/FakeDuplexStream`), and generated procedure
+  DTOs round-tripped through real `XdrWriter`/`XdrReader`. The remaining 6
+  (`Integration/LibvirtdIntegrationTests`) run against a **real libvirtd**
+  and are skipped by default (`Assert.Skip`, gated on the
+  `NETFX_LIBVIRT_TEST_SOCKET` env var) so the default `dotnet test` stays
+  100% reproducible with zero infrastructure on any contributor's machine —
+  see `docs/plan.md`'s transport section for how to run them for real.
 - [`tools/NetfxLibvirt.ProtocolGen`](../tools/NetfxLibvirt.ProtocolGen) — the
   codegen tool, three layers:
   - `Lexing/XdlLexer` + `Parsing/XdlParser` — hand-written recursive-descent
@@ -130,29 +144,44 @@ Solution `netfx-libvirt.slnx` with four projects:
 | `.x` grammar parser | `NetfxLibvirt.ProtocolGen`'s `XdlLexer`/`XdlParser` — full SunRPC/XDR + RPCL grammar, cross-checked against go-libvirt's own `sunrpc.y`/`lvlexer.go` and proven by parsing the real `virnetprotocol.x` and `remote_protocol.x` end to end. |
 | Semantic resolver | `Semantics/{XdlModuleBuilder,XdlTypeResolver,XdlConstantTable}` — const folding, typedef-chain resolution to a closed shape algebra, procedure/args/ret extraction. Proven against the real file for the full `virt-desktop`-parity procedure set. |
 | C# emitter (parity procedure set) | `Emission/*`, Roslyn-based — emits `src/NetfxLibvirt/Generated/Remote/*.cs` (22 files). Compiles as part of the real library build and round-trips real bytes in `tests/NetfxLibvirt.Tests/Generated`. |
-| RPC call engine | `Rpc/VirNetRpcClient` + `Rpc/LibvirtRpcException` — call/reply correlation by serial number, error decoding from the real `remote_error` wire shape. Hermetic tests over a fake duplex `Stream`. |
-| Auth + open handshake | `LibvirtConnection.OpenAsync` — `AUTH_LIST` then `CONNECT_OPEN`; rejects any auth mechanism besides `AuthNone` with a named `NotSupportedException` rather than guessing. Hermetic tests. |
+| RPC call engine | `Rpc/VirNetRpcClient` + `Rpc/LibvirtRpcException` — call/reply correlation by serial number, error decoding from the real `remote_error` wire shape. |
+| Auth + open handshake | `LibvirtConnection.OpenAsync` — `AUTH_LIST` then `CONNECT_OPEN`; rejects any auth mechanism besides `AuthNone` with a named `NotSupportedException` rather than guessing. |
+| Local Unix-socket transport | `Transport/UnixSocketTransport`. **This project's first connection to a real, running libvirtd** — see Validation below. |
+| Domain operations | `LibvirtConnection.{ListDomainsAsync,StartDomainAsync,ShutdownDomainAsync,DestroyDomainAsync,GetDomainXmlAsync,DisconnectAsync}` — full parity with `virt-desktop`'s `hypervisorAPI`. |
 
 ## Validation so far
 
-Everything above is validated against real upstream source (the exact `.x`
-protocol definitions and `go-libvirt`'s own wire-level code), not guessed or
-inferred from documentation prose alone — see `reference/README.md` for
-exact commits. **Not yet validated against a real running `libvirtd`** — no
-transport exists yet, so there's nothing to connect with. That's the next
-milestone, and per this project's own validation standard (mirroring the
-SPICE spike's), no procedure-encoding work should be trusted until it's been
-exercised against a real lab hypervisor, not just synthetic bytes.
+Protocol/codegen work is validated against real upstream source (the exact
+`.x` protocol definitions and `go-libvirt`'s own wire-level code), not
+guessed or inferred from documentation prose alone — see
+`reference/README.md` for exact commits, including a compatibility
+bisection against the real libvirt 8.0.0 (Ubuntu 22.04 LTS) tag.
+
+**Validated against a real running `libvirtd`, 2026-09-16.** Per this
+project's own validation standard (mirroring the SPICE spike's), no
+procedure-encoding work should be trusted until it's been exercised against
+a real hypervisor, not just synthetic bytes — done: `UnixSocketTransport` +
+`LibvirtConnection`'s full operation surface all ran against WSL2 Ubuntu
+22.04's real `libvirtd` (`test:///default`, chosen specifically so this
+validation needs no virtualization capability and stays reproducible by any
+contributor — see `docs/plan.md`'s transport section for the full
+reasoning and how to re-run it). 6/6 integration tests passed: open, list
+domains, get XML, destroy + restart with observed state transitions,
+disconnect, and a real unknown-domain error decoding into
+`LibvirtRpcException`.
 
 ## Next ready work
 
 See [`docs/plan.md`](plan.md) for the live backlog — a dependency-ordered
-list of small (2-point) stories. Current phase: reach feature parity with
-the sibling Go/Wails app `virt-desktop`'s `hypervisor.go`, traced from its
-actual source (not memory) to the exact RPC procedures it calls. Broader
-`remote_protocol.x` coverage (toward go-libvirt-level breadth) and the
-TCP/TLS transports are real goals but come *after* that parity milestone —
-see `plan.md`'s "After parity" section.
+list of small (2-point) stories. Stories 1–10 (parity codegen, RPC engine,
+and the full `LibvirtConnection` operation surface over a local Unix
+socket) are done and proven against a real libvirtd. Next: story 11, SSH
+transport via SSH.NET — matching `virt-desktop`'s actual deployment
+pattern, with a real research risk already flagged (an OpenSSH
+`direct-streamlocal` channel to a remote Unix socket, not a TCP
+port-forward). Broader `remote_protocol.x` coverage (toward go-libvirt-level
+breadth) and the TCP/TLS transports come *after* that — see `plan.md`'s
+"After parity" section.
 
 ## Out of scope for now
 

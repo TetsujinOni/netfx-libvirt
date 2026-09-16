@@ -12,11 +12,20 @@ namespace NetfxLibvirt;
 /// handshake every libvirt client must do before anything else: an
 /// <c>AUTH_LIST</c> call (libvirt requires this even when no authentication
 /// is actually used), then <c>CONNECT_OPEN</c>.
+///
+/// The operations below (<see cref="ListDomainsAsync"/>,
+/// <see cref="StartDomainAsync"/>, <see cref="ShutdownDomainAsync"/>,
+/// <see cref="DestroyDomainAsync"/>, <see cref="GetDomainXmlAsync"/>,
+/// <see cref="DisconnectAsync"/>) are deliberately the same surface as
+/// <c>virt-desktop</c>'s own <c>hypervisorAPI</c> interface
+/// (<c>hypervisor.go</c>) — this project's current parity milestone, see
+/// <c>docs/plan.md</c>.
 /// </summary>
 public sealed class LibvirtConnection : IAsyncDisposable
 {
     private readonly Stream _stream;
     private readonly VirNetRpcClient _rpc;
+    private bool _disconnected;
 
     private LibvirtConnection(Stream stream, VirNetRpcClient rpc)
     {
@@ -59,9 +68,138 @@ public sealed class LibvirtConnection : IAsyncDisposable
         return new LibvirtConnection(stream, rpc);
     }
 
-    /// <summary>Closes the underlying transport stream without a graceful
-    /// CONNECT_CLOSE RPC round-trip — a placeholder until
-    /// <c>DisconnectAsync</c> (docs/plan.md story 10) adds that. Safe to
-    /// call more than once or after a failed <see cref="OpenAsync"/>.</summary>
-    public ValueTask DisposeAsync() => _stream.DisposeAsync();
+    /// <summary>Lists every domain (active and inactive), each paired with
+    /// its current state via a separate <c>DOMAIN_GET_STATE</c> call —
+    /// mirrors <c>hypervisor.go</c>'s own <c>ListVMs</c> exactly, including
+    /// making N+1 calls rather than one, because that's what the real
+    /// protocol requires (<c>CONNECT_LIST_ALL_DOMAINS</c> doesn't return
+    /// state).</summary>
+    public async Task<IReadOnlyList<DomainSummary>> ListDomainsAsync(CancellationToken cancellationToken = default)
+    {
+        var listArgs = new RemoteConnectListAllDomainsArgs
+        {
+            NeedResults = 1,
+            Flags = (uint)(ConnectListAllDomainsFlags.Active | ConnectListAllDomainsFlags.Inactive),
+        };
+        var listWriter = new XdrWriter();
+        listArgs.Encode(listWriter);
+        var listPayload = await _rpc.CallAsync((int)RemoteProcedure.RemoteProcConnectListAllDomains, listWriter.ToArray(), cancellationToken)
+            .ConfigureAwait(false);
+        var listRet = RemoteConnectListAllDomainsRet.Decode(new XdrReader(listPayload));
+
+        var summaries = new List<DomainSummary>(listRet.Domains.Count);
+        foreach (var domain in listRet.Domains)
+        {
+            var stateArgs = new RemoteDomainGetStateArgs { Dom = domain, Flags = 0 };
+            var stateWriter = new XdrWriter();
+            stateArgs.Encode(stateWriter);
+            var statePayload = await _rpc.CallAsync((int)RemoteProcedure.RemoteProcDomainGetState, stateWriter.ToArray(), cancellationToken)
+                .ConfigureAwait(false);
+            var stateRet = RemoteDomainGetStateRet.Decode(new XdrReader(statePayload));
+
+            var state = Enum.IsDefined(typeof(DomainState), stateRet.State) ? (DomainState)stateRet.State : DomainState.Unknown;
+            summaries.Add(new DomainSummary(domain.Name, domain.Uuid, domain.Id, state));
+        }
+
+        return summaries;
+    }
+
+    /// <summary>Boots an inactive domain — mirrors <c>hypervisor.go</c>'s <c>StartVM</c>.</summary>
+    public async Task StartDomainAsync(string name, CancellationToken cancellationToken = default)
+    {
+        var domain = await LookupDomainByNameAsync(name, cancellationToken).ConfigureAwait(false);
+        var args = new RemoteDomainCreateArgs { Dom = domain };
+        var writer = new XdrWriter();
+        args.Encode(writer);
+        await _rpc.CallAsync((int)RemoteProcedure.RemoteProcDomainCreate, writer.ToArray(), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Issues an ACPI shutdown signal to the guest OS — mirrors
+    /// <c>hypervisor.go</c>'s <c>ShutdownVM</c>. Graceful; the guest OS
+    /// decides when (or whether) to actually power off.</summary>
+    public async Task ShutdownDomainAsync(string name, CancellationToken cancellationToken = default)
+    {
+        var domain = await LookupDomainByNameAsync(name, cancellationToken).ConfigureAwait(false);
+        var args = new RemoteDomainShutdownArgs { Dom = domain };
+        var writer = new XdrWriter();
+        args.Encode(writer);
+        await _rpc.CallAsync((int)RemoteProcedure.RemoteProcDomainShutdown, writer.ToArray(), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Forcefully terminates the domain's execution — mirrors
+    /// <c>hypervisor.go</c>'s <c>PowerOffVM</c> (the doc comment there says
+    /// it best: "equivalent to pulling power cord").</summary>
+    public async Task DestroyDomainAsync(string name, CancellationToken cancellationToken = default)
+    {
+        var domain = await LookupDomainByNameAsync(name, cancellationToken).ConfigureAwait(false);
+        var args = new RemoteDomainDestroyArgs { Dom = domain };
+        var writer = new XdrWriter();
+        args.Encode(writer);
+        await _rpc.CallAsync((int)RemoteProcedure.RemoteProcDomainDestroy, writer.ToArray(), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Retrieves the domain's XML description — mirrors
+    /// <c>hypervisor.go</c>'s <c>GetVMXML</c>.</summary>
+    public async Task<string> GetDomainXmlAsync(string name, CancellationToken cancellationToken = default)
+    {
+        var domain = await LookupDomainByNameAsync(name, cancellationToken).ConfigureAwait(false);
+        var args = new RemoteDomainGetXmlDescArgs { Dom = domain, Flags = 0 };
+        var writer = new XdrWriter();
+        args.Encode(writer);
+        var payload = await _rpc.CallAsync((int)RemoteProcedure.RemoteProcDomainGetXmlDesc, writer.ToArray(), cancellationToken).ConfigureAwait(false);
+        return RemoteDomainGetXmlDescRet.Decode(new XdrReader(payload)).Xml;
+    }
+
+    /// <summary>Gracefully ends the RPC session (<c>CONNECT_CLOSE</c>) and
+    /// closes the transport stream — mirrors <c>hypervisor.go</c>'s
+    /// <c>Disconnect</c>. Idempotent. Unlike <see cref="DisposeAsync"/>,
+    /// this propagates a failed close instead of swallowing it, since a
+    /// caller who explicitly asked to disconnect should find out if it
+    /// didn't work cleanly.</summary>
+    public async Task DisconnectAsync(CancellationToken cancellationToken = default)
+    {
+        if (_disconnected)
+        {
+            return;
+        }
+
+        _disconnected = true;
+        await _rpc.CallAsync((int)RemoteProcedure.RemoteProcConnectClose, ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        await _stream.DisposeAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Best-effort <see cref="DisconnectAsync"/>: attempts the same
+    /// graceful <c>CONNECT_CLOSE</c>, but — matching general .NET dispose
+    /// guidance — never throws even if that fails, and always closes the
+    /// transport stream regardless. Prefer calling <see cref="DisconnectAsync"/>
+    /// explicitly when the caller wants to know whether the close
+    /// succeeded.</summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (_disconnected)
+        {
+            return;
+        }
+
+        _disconnected = true;
+        try
+        {
+            await _rpc.CallAsync((int)RemoteProcedure.RemoteProcConnectClose, ReadOnlyMemory<byte>.Empty).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort: Dispose must not throw even if the graceful RPC close fails.
+        }
+
+        await _stream.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private async Task<RemoteNonnullDomain> LookupDomainByNameAsync(string name, CancellationToken cancellationToken)
+    {
+        var args = new RemoteDomainLookupByNameArgs { Name = name };
+        var writer = new XdrWriter();
+        args.Encode(writer);
+        var payload = await _rpc.CallAsync((int)RemoteProcedure.RemoteProcDomainLookupByName, writer.ToArray(), cancellationToken).ConfigureAwait(false);
+        return RemoteDomainLookupByNameRet.Decode(new XdrReader(payload)).Dom;
+    }
 }

@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-16 (stories 1–5 done)
+**Last updated:** 2026-09-16 (stories 1–10 done — validated against a real libvirtd)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -128,62 +128,86 @@ hermetic fake-stream test approach as story 4 (`LibvirtConnectionTests`).
 
 ### Transport — first real-libvirtd proof
 
-**Status: next; environment confirmed ready, 2026-09-16.** Everything above
-(stories 1–5) was provable hermetically. Story 6 onward needs an actual
-reachable libvirtd — checked directly rather than assumed:
+**Status: done (stories 6–10), 2026-09-16 — validated against a real running libvirtd.**
 
-- WSL2 Ubuntu 22.04 already has `libvirtd` 8.0.0 running, the calling user
-  in the `libvirt` group (`auth_unix_rw = "none"` — matches
-  `LibvirtConnection.OpenAsync`'s `AuthNone`-only support, no lab
-  credentials needed), and KVM/nested-virt confirmed working. No package
-  provisioning needed.
-- Per the open-source-independence requirement (this project must stay
-  reproducible by any contributor, not depend on the maintainer's private
-  lab): **`test:///default`** — libvirt's built-in null-hypervisor driver,
-  already present with a running fake domain, real RPC traffic over a real
-  Unix socket, zero virtualization capability required — is the intended
-  validation target for this story and stories 7–10's own tests, not
-  `qemu:///system`. Real qemu+KVM is available in this WSL instance too and
-  fine for the maintainer's own manual sanity pass, but nothing committed
-  should depend on it existing. A lab account is not needed for any of
-  stories 6–10.
-- Compatibility with an 8.0.0-era daemon specifically (not just "some
-  libvirtd") was verified by diffing the real `v8.0.0` tag against our
-  vendored master `.x` files — see `reference/README.md`'s "Compatibility
-  bisection" section. Zero changes touch anything this project generates;
-  the WSL daemon is a safe, and genuinely representative (Ubuntu 22.04 LTS,
-  broadly deployed), validation target. Follow-on design implication for
-  later stories: treat an "unknown procedure" `VIR_NET_ERROR` reply as an
-  expected, catchable case (`LibvirtRpcException`) once the emitted surface
-  grows past what an old fleet member supports — not something to
-  version-pin the vendored `.x` files around.
+Environment: WSL2 Ubuntu 22.04's `libvirtd` 8.0.0, the calling user already
+in the `libvirt` group (`auth_unix_rw = "none"` — matches
+`LibvirtConnection.OpenAsync`'s `AuthNone`-only support, no lab credentials
+needed). One real provisioning gap found and closed: the WSL distro had no
+.NET SDK, so a Windows-native `dotnet test` can't reach a Unix socket living
+inside WSL2's separate kernel namespace regardless. Installed .NET 10 SDK
+into WSL via Microsoft's official `dotnet-install.sh` (user-local, no root,
+`~/.dotnet`) — a standard, publicly-documented, zero-lab-dependency step,
+not a lab account. From there the repo (mounted at `/mnt/d/work/netfx-libvirt`)
+builds and runs identically to any Linux host.
 
-**6. Local Unix-socket transport.**
-`UnixSocketTransport` over `System.Net.Sockets.Socket` +
-`UnixDomainSocketEndPoint` (supported on both Windows 10+ and Linux — no
-platform shim needed). **First point this project validates against a real
-libvirtd** — connect + auth + open against `test:///default` over WSL's
-Unix socket, nothing more yet.
+Per the open-source-independence requirement (this project must stay
+reproducible by any contributor, not depend on the maintainer's private
+lab), **`test:///default`** — libvirt's built-in null-hypervisor driver,
+real RPC over a real Unix socket, zero virtualization capability required —
+is the validation target for stories 6–10, not `qemu:///system` or the lab.
+Confirmed the daemon itself (not just `virsh`'s in-process driver fallback)
+serves it, by forcing the remote/RPC path explicitly:
+`virsh -c 'test+unix:///default?socket=/var/run/libvirt/libvirt-sock' list --all`.
+A lab account was not needed for any of stories 6–10.
 
-**7. `ListDomains()`.**
-`ConnectListAllDomains(1, 3)` + a `DomainGetState` call per returned domain,
-assembled into the same shape `virt-desktop`'s `VMInfo` carries (name, uuid,
-id, state — `HasVNC` is out of scope, see above). Validate against real WSL
-libvirtd domains.
+Compatibility with an 8.0.0-era daemon specifically (not just "some
+libvirtd") was verified beforehand by diffing the real `v8.0.0` tag against
+our vendored master `.x` files — see `reference/README.md`'s "Compatibility
+bisection" section. Zero changes touch anything this project generates.
+Follow-on design implication for later stories: treat an "unknown
+procedure" `VIR_NET_ERROR` reply as an expected, catchable case
+(`LibvirtRpcException`) once the emitted surface grows past what an old
+fleet member supports — not something to version-pin the vendored `.x`
+files around.
+
+All of `tests/NetfxLibvirt.Tests/Integration/LibvirtdIntegrationTests.cs`
+passed against the real daemon (6/6): open, list domains (finds the seeded
+`test` domain, correct `Running` state), get its XML, destroy then restart
+it and observe the state transitions, disconnect cleanly, and a real
+`VIR_ERR_NO_DOMAIN`-shaped error decoding into `LibvirtRpcException` for an
+unknown name. These tests are **skipped by default** (via `Assert.Skip`,
+gated on the `NETFX_LIBVIRT_TEST_SOCKET` env var) so `dotnet test` stays
+100% hermetic and reproducible with zero infrastructure on any contributor's
+machine — run them with:
+```bash
+NETFX_LIBVIRT_TEST_SOCKET=/var/run/libvirt/libvirt-sock \
+    dotnet test tests/NetfxLibvirt.Tests --filter "FullyQualifiedName~Integration"
+```
+from WSL or any Linux host with a `test:///default`-capable libvirtd — never
+from a Windows-native process, which can't reach a WSL2 Unix socket.
+
+**6. Local Unix-socket transport.** `UnixSocketTransport`
+(`src/NetfxLibvirt/Transport/UnixSocketTransport.cs`) over
+`System.Net.Sockets.Socket` + `UnixDomainSocketEndPoint`. Proven against the
+real daemon.
+
+**7. `ListDomains()`.** `LibvirtConnection.ListDomainsAsync` — `ConnectListAllDomains`
+(flags via the new `ConnectListAllDomainsFlags`) + a `DomainGetState` call
+per returned domain, assembled into `DomainSummary` (the same shape
+`virt-desktop`'s `VMInfo` carries: name, uuid, id, state via the new
+`DomainState` enum — `HasVNC` stays out of scope, see above). Proven against
+the real daemon.
 
 **8. `StartDomain`/`ShutdownDomain`/`DestroyDomain`.**
-Each: `DomainLookupByName` then `DomainCreate`/`DomainShutdown`/
-`DomainDestroy`. Validate against a real (disposable) VM in WSL libvirtd.
+`LibvirtConnection.{StartDomainAsync,ShutdownDomainAsync,DestroyDomainAsync}` —
+each: `DomainLookupByName` then `DomainCreate`/`DomainShutdown`/
+`DomainDestroy`. Proven against the real daemon (destroy + restart
+round-trip, state transitions observed).
 
-**9. `GetDomainXml()`.**
-`DomainLookupByName` + `DomainGetXMLDesc`. Validate against real libvirtd.
+**9. `GetDomainXml()`.** `LibvirtConnection.GetDomainXmlAsync` —
+`DomainLookupByName` + `DomainGetXMLDesc`. Proven against the real daemon.
 
-**10. `DisconnectAsync()`.**
-`ConnectClose` + close the transport stream. Completes the
-`LibvirtConnection` surface to full parity with `hypervisor.go`'s
-`hypervisorAPI` interface.
+**10. `DisconnectAsync()`.** `LibvirtConnection.DisconnectAsync` —
+`ConnectClose` + close the transport stream, idempotent.
+`LibvirtConnection.DisposeAsync` does the same best-effort (never throws,
+even if the graceful close fails). Completes the `LibvirtConnection`
+surface to full parity with `hypervisor.go`'s `hypervisorAPI` interface.
+Proven against the real daemon.
 
 ### Remote deployment — matching `virt-desktop`'s actual pattern
+
+**Status: next.**
 
 **11. SSH transport via SSH.NET.**
 The real research risk flagged above: `virt-desktop` doesn't port-forward

@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-16 (stories 1–10 done and validated against a real libvirtd; story 11 implemented, real-SSH validation pending a manual `sudo` step)
+**Last updated:** 2026-09-16 (stories 1–11 done and validated against real infra — story 11's SSH transport via a self-built Testcontainers image, zero host configuration)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -207,7 +207,7 @@ Proven against the real daemon.
 
 ### Remote deployment — matching `virt-desktop`'s actual pattern
 
-**Status: implemented, 2026-09-16; real-SSH validation pending (needs `sudo`, see below).**
+**Status: implemented and validated against real infra, 2026-09-16 — zero host configuration needed.**
 
 **11. SSH transport.** Superseded the original SSH.NET assumption after two
 rounds of research:
@@ -260,17 +260,53 @@ which plugs straight into the already-proven `LibvirtConnection.OpenAsync`
 unchanged, since everything from story 4 onward was built transport-agnostic
 from the start.
 
-Real-SSH validation (`tests/NetfxLibvirt.Tests/Integration/SshLibvirtdIntegrationTests.cs`,
-same skip-by-default-via-env-var pattern as the Unix-socket integration
-tests) is written but **not yet run for real** — it needs WSL's
-`openssh-server`, and installing it requires an interactive `sudo` password
-this session can't supply. Run once, by hand, inside WSL:
-```bash
-sudo apt-get install -y openssh-server
-sudo systemctl enable --now ssh
-```
-then run the test suite with `NETFX_LIBVIRT_SSH_HOST`/`_USER`/`_PRIVATE_KEY_PATH`
-(or `_PASSWORD`) set — see that test class's own doc for the exact command.
+**Real-SSH validation pivoted to Testcontainers, replacing host
+configuration entirely** — prompted by a good challenge to the original
+"install `openssh-server` in WSL, needs `sudo`" plan: that only works on
+*this* machine, and does nothing for a future OSS contributor's machine or
+GitHub Actions CI. Neither of those can be assumed to have WSL, a
+configured libvirtd, or an interactively-typed `sudo` password — but both
+can be assumed to have Docker.
+
+`tests/NetfxLibvirt.Tests/Integration/docker/` is a small, self-authored
+image (not a third-party Docker Hub image — better supply-chain posture,
+consistent with story 11's own library-choice reasoning): Ubuntu 22.04 (the
+same libvirt 8.0.0 baseline the compatibility bisection validated) +
+`libvirt-daemon-system` + `openssh-server`, nothing else — no
+qemu-system/kvm, no `--privileged`, no `/dev/kvm`, since these tests only
+ever touch libvirt's `test:///default` null-hypervisor driver. A fixed,
+committed test-only key pair (`id_ecdsa`/`id_ecdsa.pub` — see that
+directory's README for why committing a "private" key here is fine: it
+authenticates into a container built fresh from this same repo on every
+run, not a real secret) is baked into `authorized_keys`.
+`Integration/LibvirtdContainerFixture` (an xUnit collection fixture) builds
+and starts this image via `Testcontainers`, mapping the SSH port to a
+random host port; if Docker itself isn't reachable, tests skip cleanly
+instead of failing (same UX as the old env-var gate, just a much lower,
+more standard bar). `SshLibvirtdIntegrationTests` now runs against it
+**by default, no env var, no manual setup** — and does, every time
+`dotnet test` runs on a machine with Docker, including CI once a workflow
+exists.
+
+Caught immediately by actually running it: the first test-key generation
+used ed25519, and `Microsoft.DevTunnels.Ssh.Keys`' OpenSSH importer only
+supports RSA/ECDSA — every test failed with a clear
+`NotSupportedException` naming the exact gap. Regenerated as ECDSA P-256;
+all 4 tests then passed against the real, freshly-built container: open,
+list domains (finds the seeded `test` domain), get its XML, disconnect.
+
+**Deliberately not done yet:** migrating `LibvirtdIntegrationTests` (the
+raw local Unix-socket transport, stories 6–10) to the same container
+approach. A Unix domain socket is a kernel object, not just a file — even
+bind-mounted to a host-visible path, a container's socket isn't dialable
+from a native Windows process (Docker Desktop's backend is itself a Linux
+VM; same fundamental boundary WSL2 has). That migration can only be proven
+from a Linux-kernel context (Linux CI, or WSL) that this session doesn't
+have direct access to prove against right now, so it's tracked as a
+follow-up rather than shipped unverified — this project doesn't trust
+infra-adjacent code it hasn't actually run, and just watched that
+discipline catch a real bug above. `LibvirtdIntegrationTests` keeps its
+existing env-var/WSL-gated design for now, unaffected.
 
 **12. End-to-end validation against the real lab host.**
 Full `Connect → ListDomains → Start/Shutdown/Destroy → GetDomainXml →

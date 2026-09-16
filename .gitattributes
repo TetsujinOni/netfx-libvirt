@@ -1,0 +1,10 @@
+# Shell scripts and Dockerfiles run inside Linux containers — force LF
+# regardless of a Windows checkout's core.autocrlf, or a CRLF-corrupted
+# shebang line breaks the container with "bad interpreter" at startup.
+*.sh text eol=lf
+Dockerfile text eol=lf
+
+# SSH key files: never line-ending-convert, treat as opaque bytes so a
+# Windows checkout can't subtly corrupt the PEM encoding.
+id_ecdsa binary
+id_ecdsa.pub binary

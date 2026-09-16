@@ -1,6 +1,6 @@
 # netfx-libvirt — Status
 
-**Last updated:** 2026-09-16 (plan stories 1–10 done and validated against a real libvirtd; story 11 implemented, real-SSH validation pending — see `docs/plan.md`)
+**Last updated:** 2026-09-16 (plan stories 1–11 done and validated against real infra — see `docs/plan.md`)
 
 ## What this is
 
@@ -62,20 +62,21 @@ Solution `netfx-libvirt.slnx` with four projects:
     `XdlConstantTable`'s doc), values cross-checked against go-libvirt's
     `const.gen.go`.
 - [`tests/NetfxLibvirt.Tests`](../tests/NetfxLibvirt.Tests) — xUnit v3, 125
-  tests. 115 are fully hermetic (no network, no real libvirtd) and always
-  run: every XDR primitive by byte-literal assertion *and* round-trip, the
-  real `REMOTE_PROC_AUTH_LIST` call header byte-for-byte, message framing,
-  the RPC call engine and every `LibvirtConnection` operation over a small
-  fake duplex `Stream` (`Rpc/FakeDuplexStream`), and generated procedure
-  DTOs round-tripped through real `XdrWriter`/`XdrReader`. The remaining 10
-  (`Integration/{LibvirtdIntegrationTests,SshLibvirtdIntegrationTests}`) run
-  against a **real libvirtd** (6 over a local Unix socket, 4 over real SSH)
-  and are skipped by default (`Assert.Skip`, gated on env vars) so the
-  default `dotnet test` stays 100% reproducible with zero infrastructure on
-  any contributor's machine — see `docs/plan.md`'s transport sections for
-  how to run them for real. The Unix-socket 6 have been run for real and
-  passed; the SSH 4 are written but not yet run for real (needs WSL's
-  `openssh-server`, an interactive `sudo` step — see `plan.md` story 11).
+  tests. 119 run with **no special setup beyond Docker being available**:
+  115 fully hermetic (every XDR primitive by byte-literal assertion *and*
+  round-trip, the real `REMOTE_PROC_AUTH_LIST` call header byte-for-byte,
+  message framing, the RPC call engine and every `LibvirtConnection`
+  operation over a small fake duplex `Stream`, generated procedure DTOs
+  round-tripped through real `XdrWriter`/`XdrReader`) plus 4
+  (`Integration/SshLibvirtdIntegrationTests`) that run for real over SSH
+  against a throwaway libvirtd+sshd container this project builds itself
+  (`Integration/docker/`, via `Testcontainers` — see `docs/plan.md`'s
+  transport section) every time the suite runs — no WSL, no manual host
+  setup, works identically for any contributor and in CI. The remaining 6
+  (`Integration/LibvirtdIntegrationTests`, the local Unix-socket transport)
+  still need a manually-configured real libvirtd (env-var gated, skip by
+  default) — not yet migrated to the container approach; see `plan.md`
+  story 11 for why.
 - [`tools/NetfxLibvirt.ProtocolGen`](../tools/NetfxLibvirt.ProtocolGen) — the
   codegen tool, three layers:
   - `Lexing/XdlLexer` + `Parsing/XdlParser` — hand-written recursive-descent
@@ -161,7 +162,8 @@ Solution `netfx-libvirt.slnx` with four projects:
 | Auth + open handshake | `LibvirtConnection.OpenAsync` — `AUTH_LIST` then `CONNECT_OPEN`; rejects any auth mechanism besides `AuthNone` with a named `NotSupportedException` rather than guessing. |
 | Local Unix-socket transport | `Transport/UnixSocketTransport`. **This project's first connection to a real, running libvirtd** — see Validation below. |
 | Domain operations | `LibvirtConnection.{ListDomainsAsync,StartDomainAsync,ShutdownDomainAsync,DestroyDomainAsync,GetDomainXmlAsync,DisconnectAsync}` — full parity with `virt-desktop`'s `hypervisorAPI`. |
-| SSH transport | `Transport/SshTransport` on `Microsoft.DevTunnels.Ssh` — execs libvirt's own `virt-ssh-helper` over a plain SSH exec channel rather than replicating `virt-desktop`'s `direct-streamlocal` channel-open. Implemented; real-SSH validation pending (see below). |
+| SSH transport | `Transport/SshTransport` on `Microsoft.DevTunnels.Ssh` — execs libvirt's own `virt-ssh-helper` over a plain SSH exec channel rather than replicating `virt-desktop`'s `direct-streamlocal` channel-open. Validated against a real, self-built container — see Validation below. |
+| Container-based real-infra tests | `Integration/{docker,LibvirtdContainerFixture}` — a small self-authored image (Ubuntu 22.04 + `libvirt-daemon-system` + `openssh-server`, no qemu/kvm, no `--privileged`) built and started via `Testcontainers` on every test run. Zero host configuration; works the same for any contributor and in CI. |
 
 ## Validation so far
 
@@ -184,31 +186,36 @@ domains, get XML, destroy + restart with observed state transitions,
 disconnect, and a real unknown-domain error decoding into
 `LibvirtRpcException`.
 
-**SSH transport not yet run against real infrastructure.** `SshTransport`
-and `Integration/SshLibvirtdIntegrationTests` are written and the library
-build is clean, but the test suite needs `openssh-server` running in WSL,
-and installing it needs an interactive `sudo` password this session can't
-supply (a stuck earlier attempt was killed rather than left hanging — see
-`docs/plan.md` story 11). Until that test suite is actually run, this
-transport should be treated as **unvalidated against real infra**, per this
-project's own standard — API-shape-correct by construction (built directly
-against `Microsoft.DevTunnels.Ssh`'s real source, not guessed), but not yet
-proven.
+**SSH transport validated against real infrastructure, 2026-09-16 — with
+zero host configuration.** The original plan (install `openssh-server` in
+WSL by hand) only works on one machine and does nothing for a future OSS
+contributor or CI — pivoted to `Testcontainers` instead: a small
+self-authored image (`tests/NetfxLibvirt.Tests/Integration/docker/`, no
+qemu/kvm, no `--privileged` — these tests only touch libvirt's
+`test:///default` null-hypervisor driver) built and started fresh on every
+test run, needing nothing but a working Docker daemon. Running it for real
+caught a genuine bug immediately: the first test key used ed25519, and
+`Microsoft.DevTunnels.Ssh.Keys`' OpenSSH importer only supports RSA/ECDSA
+— every test failed with a clear, specific exception. Regenerated as
+ECDSA P-256; all 4 `SshLibvirtdIntegrationTests` then passed against the
+real container: open, list domains, get XML, disconnect. These now run
+**by default** (no env var, no manual setup) whenever `dotnet test` runs on
+a machine with Docker.
 
 ## Next ready work
 
 See [`docs/plan.md`](plan.md) for the live backlog — a dependency-ordered
-list of small (2-point) stories. Stories 1–10 (parity codegen, RPC engine,
-and the full `LibvirtConnection` operation surface over a local Unix
-socket) are done and proven against a real libvirtd. Story 11 (SSH
-transport, on `Microsoft.DevTunnels.Ssh`) is implemented but not yet
-validated against real infrastructure — install `openssh-server` in WSL
-(one manual `sudo` step) and run
-`Integration/SshLibvirtdIntegrationTests` to close that out. Then story 12,
-end-to-end validation against the real lab host — the actual parity
-finish line. Broader `remote_protocol.x` coverage (toward go-libvirt-level
-breadth) and the TCP/TLS transports come *after* that — see `plan.md`'s
-"After parity" section.
+list of small (2-point) stories. Stories 1–11 (parity codegen, RPC engine,
+the full `LibvirtConnection` operation surface, and both the local
+Unix-socket and remote SSH transports) are done and proven against real
+infra. Next: story 12, end-to-end validation against the real lab host —
+the actual parity finish line. Also tracked as a follow-up (not blocking):
+migrating `LibvirtdIntegrationTests` (the local Unix-socket transport) to
+the same Testcontainers approach story 11 landed — deferred because it can
+only be proven from a Linux-kernel host (Linux CI or WSL), which this
+session couldn't verify directly. Broader `remote_protocol.x` coverage
+(toward go-libvirt-level breadth) and the TCP/TLS transports come *after*
+story 12 — see `plan.md`'s "After parity" section.
 
 ## Out of scope for now
 

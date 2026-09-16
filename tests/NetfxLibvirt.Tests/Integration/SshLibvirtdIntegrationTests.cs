@@ -8,52 +8,41 @@ namespace NetfxLibvirt.Tests.Integration;
 /// deployment pattern (SSH to the remote host, then reach libvirt) rather
 /// than the local Unix socket <see cref="LibvirtdIntegrationTests"/> covers.
 ///
-/// Skipped by default — set <see cref="HostEnvVar"/> (and the other env
-/// vars below) to run — for the same open-source-independence reason as
-/// <see cref="LibvirtdIntegrationTests"/>: `dotnet test` must stay
-/// reproducible with zero infrastructure on any contributor's machine.
+/// Runs against the throwaway container <see cref="LibvirtdContainerFixture"/>
+/// builds and starts — needs only Docker, no manual host setup, works the
+/// same for every contributor and in CI. If Docker itself isn't reachable,
+/// these tests skip cleanly rather than fail (see the fixture's doc).
 ///
-/// To run against WSL's own libvirtd over SSH to localhost (after
-/// `sudo apt-get install -y openssh-server && sudo systemctl enable --now ssh`
-/// inside WSL, and adding your public key to
-/// `~/.ssh/authorized_keys` there, or setting a password):
-/// <code>
-/// NETFX_LIBVIRT_SSH_HOST=localhost \
-/// NETFX_LIBVIRT_SSH_USER=&lt;your WSL username&gt; \
-/// NETFX_LIBVIRT_SSH_PRIVATE_KEY_PATH=/home/&lt;user&gt;/.ssh/id_ed25519 \
-///     dotnet test tests/NetfxLibvirt.Tests --filter FullyQualifiedName~SshLibvirtdIntegrationTests
-/// </code>
-/// This uses <see cref="SshHostKeyVerifiers.DangerousAcceptAny"/> deliberately —
-/// appropriate only because the target here is a loopback connection to a
-/// host this test suite (and whoever set the env vars) already controls,
-/// not a real remote deployment. Never do that outside a test like this one.
+/// Uses <see cref="SshHostKeyVerifiers.DangerousAcceptAny"/> deliberately —
+/// appropriate here specifically because the target is a throwaway
+/// container this test run itself just built, not a real remote
+/// deployment. Never do that outside a test like this one.
 /// </summary>
+[Collection(nameof(LibvirtdContainerCollection))]
 public class SshLibvirtdIntegrationTests
 {
-    private const string HostEnvVar = "NETFX_LIBVIRT_SSH_HOST";
-    private const string PortEnvVar = "NETFX_LIBVIRT_SSH_PORT";
-    private const string UserEnvVar = "NETFX_LIBVIRT_SSH_USER";
-    private const string PasswordEnvVar = "NETFX_LIBVIRT_SSH_PASSWORD";
-    private const string PrivateKeyPathEnvVar = "NETFX_LIBVIRT_SSH_PRIVATE_KEY_PATH";
     private const string TestUri = "test:///default";
 
-    private static async Task<LibvirtConnection> OpenAsync(CancellationToken cancellationToken)
+    private readonly LibvirtdContainerFixture _fixture;
+
+    public SshLibvirtdIntegrationTests(LibvirtdContainerFixture fixture)
     {
-        var host = Environment.GetEnvironmentVariable(HostEnvVar);
-        var user = Environment.GetEnvironmentVariable(UserEnvVar);
-        if (string.IsNullOrEmpty(host) || string.IsNullOrEmpty(user))
+        _fixture = fixture;
+    }
+
+    private async Task<LibvirtConnection> OpenAsync(CancellationToken cancellationToken)
+    {
+        if (_fixture.StartupFailure is not null)
         {
-            Assert.Skip($"Set {HostEnvVar} and {UserEnvVar} (and {PasswordEnvVar} or {PrivateKeyPathEnvVar}) to run SSH integration tests (see this class's doc).");
+            Assert.Skip($"Integration test container failed to start (is Docker running?): {_fixture.StartupFailure}");
         }
 
-        var portText = Environment.GetEnvironmentVariable(PortEnvVar);
         var options = new SshTransportOptions
         {
-            Host = host,
-            Port = string.IsNullOrEmpty(portText) ? 22 : int.Parse(portText),
-            Username = user,
-            Password = Environment.GetEnvironmentVariable(PasswordEnvVar),
-            PrivateKeyPath = Environment.GetEnvironmentVariable(PrivateKeyPathEnvVar),
+            Host = _fixture.Host,
+            Port = _fixture.SshHostPort,
+            Username = "root",
+            PrivateKeyPath = _fixture.PrivateKeyPath,
             VerifyHostKey = SshHostKeyVerifiers.DangerousAcceptAny,
             RemoteUri = TestUri,
         };

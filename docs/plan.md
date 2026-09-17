@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-16 (stories 1–11 done and validated against real infra — story 11's SSH transport via a self-built Testcontainers image, zero host configuration)
+**Last updated:** 2026-09-17 (stories 1–11 done and validated against real infra; story 11's fixture image now published to GHCR and pulled by default, both acquisition paths confirmed end-to-end. Story 12 — the real-lab-host finish line — is next and needs the user's input to proceed, see that story below.)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -347,14 +347,27 @@ build path that was already the only path before this. Force local build
 directly (skip the doomed pull attempt while iterating on the Dockerfile)
 via `NETFX_LIBVIRT_TEST_FORCE_LOCAL_BUILD=1`.
 
-**Known gap:** GHCR packages pushed via a repo's own `GITHUB_TOKEN`
-typically default to *private* visibility even when the repo itself is
-public, and the workflow doesn't (and via `GITHUB_TOKEN` can't reliably)
-flip that automatically. Until the package's visibility is manually set to
-public in its GHCR settings after the first publish, external
-contributors/forks will get a 401 on the pull attempt and silently fall
-back to local build — correct behavior, just not the fast path. One-time
-manual step, not a code TODO.
+**Validated end-to-end, 2026-09-17:** pushed to `origin/main`
+(`76c6473`), the workflow ran green (`gh run watch`) and published
+`ghcr.io/tetsujinoni/netfx-libvirt/test-fixture-libvirtd-sshd:b4e8e1b7c4b5`.
+An anonymous `docker pull` (no login at all) succeeded — the
+package came up **public by default**, not private; the "known gap"
+originally written here about GHCR defaulting new packages to private
+didn't materialize for a repo-linked package on a public repo, so no
+manual visibility fix was needed. Confirmed both acquisition paths
+actually take the code path they claim to, not just "tests still pass
+either way": after clearing the local Docker image cache entirely, a
+plain `dotnet test` run resolved the container under the `ghcr.io/...`
+tag (proving the registry-pull path ran, not a silent fallback) in ~10s;
+`NETFX_LIBVIRT_TEST_FORCE_LOCAL_BUILD=1 dotnet test` produced the
+separate `netfx-libvirt-integration-test-libvirtd` tag (proving the
+fallback path still works standalone) in ~30s. Both: 245 succeeded, 0
+failed, 6 skipped — identical to the pre-GHCR baseline. An adversarial
+security review (`/security-review`, sub-agent identify + filter pass)
+of the workflow and acquisition code before pushing found no findings
+above low-confidence/non-exploitable (push-to-main + `workflow_dispatch`
+only, no `pull_request` trigger, so no fork-PR path reaches the
+`packages: write`-scoped token).
 
 **Deliberately not done yet:** migrating `LibvirtdIntegrationTests` (the
 raw local Unix-socket transport, stories 6–10) to the same container

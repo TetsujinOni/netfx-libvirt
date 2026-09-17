@@ -6,8 +6,8 @@ machine-parsed, for `upstream-x`) as a reference only.
 
 ## `upstream-x/`
 
-The real, unmodified libvirt RPC protocol definitions, fetched directly from
-`libvirt/libvirt@master` on 2026-09-15:
+The real, unmodified libvirt RPC protocol definitions, at a pinned commit
+originally fetched from `libvirt/libvirt@master` on 2026-09-15:
 
 | File | Source commit (last touching that path) |
 |---|---|
@@ -15,17 +15,40 @@ The real, unmodified libvirt RPC protocol definitions, fetched directly from
 | `remote_protocol.x` | [`6924b73`](https://github.com/libvirt/libvirt/commit/6924b73d30d126ede2f6496615c666ce686462b5) |
 
 `virnetprotocol.x` defines the 24-byte `virNetMessageHeader` and framing
-(ported by hand into `src/NetfxLibvirt/Rpc/`). `remote_protocol.x` (~7200
-lines, 200+ procedures) is the actual target of the future `.x`-parsing
-codegen — not yet hand-read in full, only grepped for the MVP procedure
-numbers so far.
+(ported by hand into `src/NetfxLibvirt/Rpc/`). `remote_protocol.x` is what
+`tools/NetfxLibvirt.ProtocolGen` mechanically parses to emit
+`src/NetfxLibvirt/Generated/Remote`.
 
-Refetch with:
+**Fetched at build/dev time, not committed to this repo** (2026-09-18,
+superseding the original vendoring above). Both files carry their own
+`Copyright (C) Red Hat, Inc.` / LGPL-2.1-or-later header — real, checked
+directly in the files themselves, not assumed. Reimplementing a protocol
+by parsing a specification file, without copying its own source into what
+you ship, is generally understood not to create an LGPL-derivative work of
+the specification (and `go-libvirt` — Apache-2.0 — has operated on exactly
+that basis for years, generating from these same files without any LGPL
+entanglement in its own output). But *redistributing the specification file
+itself* verbatim, inside a repo otherwise licensed MIT, is a different and
+easily-avoidable thing to also be doing — confirmed directly against
+`go-libvirt`'s own generator (`internal/lvgen/gen/main.go`): it never
+vendors/commits the `.x` files either, requiring a `$LIBVIRT_SOURCE` env
+var pointing at a separately-obtained local libvirt checkout instead, read
+only at generation time. This project does the equivalent via a pinned-
+commit fetch (better suited to running in GitHub Actions than requiring a
+full local libvirt checkout, and libvirt itself moved to GitLab CI + Meson
+some time ago — a different enough CI ecosystem that mirroring its own
+tooling wasn't the right fit either): run
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/libvirt/libvirt/master/src/rpc/virnetprotocol.x -o upstream-x/virnetprotocol.x
-curl -fsSL https://raw.githubusercontent.com/libvirt/libvirt/master/src/remote/remote_protocol.x -o upstream-x/remote_protocol.x
+reference/fetch-upstream-x.sh
 ```
+
+once after cloning (or whenever the pinned commits above change) before
+running the generator or `NetfxLibvirt.ProtocolGen.Tests`'
+`RealProtocolFileTests`/`RealModuleTests` — both skip cleanly, not fail, if
+the fetch hasn't happened yet. A future CI workflow that runs
+`dotnet test` needs to run this script first for those two test classes to
+actually exercise anything real rather than skip.
 
 ### Compatibility bisection: master vs. libvirt v8.0.0 (2026-09-16)
 

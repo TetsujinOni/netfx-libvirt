@@ -14,9 +14,19 @@ public class RealModuleTests
     // walking up from AppContext.BaseDirectory looking for the repo root —
     // that breaks whenever the source tree isn't checked out alongside the
     // test binaries.
+    //
+    // Fetched (reference/fetch-upstream-x.sh), not vendored — see
+    // reference/README.md — so it may genuinely not be there yet on a fresh
+    // clone; skip cleanly rather than fail, matching this project's usual
+    // "missing prerequisite -> skip" pattern (Docker, WSL socket, etc.).
     private static XdlModule BuildRemoteProtocolModule()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "reference", "upstream-x", "remote_protocol.x");
+        if (!File.Exists(path))
+        {
+            Assert.Skip("remote_protocol.x hasn't been fetched — run reference/fetch-upstream-x.sh first.");
+        }
+
         return XdlModuleBuilder.Build(XdlParser.Parse(File.ReadAllText(path)));
     }
 

@@ -2,8 +2,12 @@ using NetfxLibvirt.ProtocolGen.Emission;
 using NetfxLibvirt.ProtocolGen.Parsing;
 using NetfxLibvirt.ProtocolGen.Semantics;
 
-// Dev-time CLI: regenerates src/NetfxLibvirt/Generated/Remote from the
-// vendored reference/upstream-x/remote_protocol.x. Run with `dotnet run
+// Dev-time CLI: regenerates src/NetfxLibvirt/Generated/Remote from
+// reference/upstream-x/remote_protocol.x — fetched at a pinned commit via
+// reference/fetch-upstream-x.sh (run that first), not vendored/committed:
+// it's Red Hat's LGPL-2.1-or-later source, and redistributing it verbatim
+// alongside this project's own MIT code isn't something to do just because
+// it's convenient — see reference/README.md. Run with `dotnet run
 // --project tools/NetfxLibvirt.ProtocolGen` from the repo root, or pass the
 // repo root explicitly as the first argument.
 //

@@ -33,8 +33,10 @@ built.
 
 Codegen-first, mirroring `go-libvirt`'s own strategy: parse libvirt's real
 upstream `.x` XDR protocol files (`src/rpc/virnetprotocol.x`,
-`src/remote/remote_protocol.x` — vendored in
-[`reference/upstream-x`](reference/upstream-x)) and generate C# bindings
+`src/remote/remote_protocol.x` — fetched at a pinned commit into
+[`reference/upstream-x`](reference/upstream-x) via
+[`reference/fetch-upstream-x.sh`](reference/fetch-upstream-x.sh), not
+committed — see that folder's README) and generate C# bindings
 mechanically via a Roslyn-based emitter (`tools/NetfxLibvirt.ProtocolGen`),
 rerunnable against new libvirt versions rather than hand-ported once.
 
@@ -65,5 +67,21 @@ working Docker daemon and are skipped cleanly if one isn't available.
 
 ## License
 
-Not yet chosen — will be an OSI-approved permissive license (matching the
-Apache 2.0 reference implementation).
+[MIT](LICENSE). Chosen by checking the actual dependency graph rather than
+defaulting to the Apache-2.0 reference implementation's own choice: every
+direct dependency (`SSH.NET`, `Testcontainers`, Roslyn, xunit.v3's one
+Apache-2.0 exception among them) is permissive/non-copyleft, so nothing
+here forces a particular license — MIT is the strictly simpler and more
+permissive of the two OSI-approved options in play (no patent-grant/
+retaliation clause, no NOTICE-file or changed-file disclosure
+requirements), at the cost of not carrying Apache 2.0's explicit patent
+grant.
+
+This covers this project's own code and its actual dependencies — not
+libvirt's own protocol definitions this project reads to generate that
+code. Those two `.x` files are Red Hat's LGPL-2.1-or-later source, which
+is exactly why they're fetched at a pinned commit rather than committed to
+this repo (see [`reference/README.md`](reference/README.md)): generating
+original code from a parsed protocol specification, without redistributing
+the specification file itself, is the same basis `go-libvirt` (Apache-2.0)
+has shipped on for years.

@@ -11,3 +11,8 @@ obj/
 ## OS
 .DS_Store
 Thumbs.db
+
+## Fetched-not-vendored upstream sources (see reference/README.md and
+## reference/fetch-upstream-x.sh) - LGPL-2.1+ source, deliberately not
+## redistributed as part of this repo.
+reference/upstream-x/*.x

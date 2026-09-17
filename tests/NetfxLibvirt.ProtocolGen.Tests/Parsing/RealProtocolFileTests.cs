@@ -16,8 +16,21 @@ public class RealProtocolFileTests
     // walking up from AppContext.BaseDirectory looking for the repo root —
     // that breaks whenever the source tree isn't checked out alongside the
     // test binaries.
-    private static string ReadUpstreamFile(string name) =>
-        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "reference", "upstream-x", name));
+    //
+    // Fetched (reference/fetch-upstream-x.sh), not vendored — see
+    // reference/README.md — so it may genuinely not be there yet on a fresh
+    // clone; skip cleanly rather than fail, matching this project's usual
+    // "missing prerequisite -> skip" pattern (Docker, WSL socket, etc.).
+    private static string ReadUpstreamFile(string name)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "reference", "upstream-x", name);
+        if (!File.Exists(path))
+        {
+            Assert.Skip($"{name} hasn't been fetched — run reference/fetch-upstream-x.sh first.");
+        }
+
+        return File.ReadAllText(path);
+    }
 
     [Fact]
     public void Parse_VirNetProtocolX_Succeeds()

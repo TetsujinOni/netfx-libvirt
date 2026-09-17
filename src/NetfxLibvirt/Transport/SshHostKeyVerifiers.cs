@@ -1,5 +1,3 @@
-using Microsoft.DevTunnels.Ssh.Algorithms;
-
 namespace NetfxLibvirt.Transport;
 
 public static class SshHostKeyVerifiers
@@ -11,5 +9,5 @@ public static class SshHostKeyVerifiers
     /// way (e.g. a disposable lab environment you provisioned yourself) —
     /// it defeats SSH's protection against a machine-in-the-middle
     /// impersonating the real libvirt host.</summary>
-    public static bool DangerousAcceptAny(IKeyPair hostKey) => true;
+    public static bool DangerousAcceptAny(SshHostKeyInfo hostKey) => true;
 }

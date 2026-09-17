@@ -1,5 +1,3 @@
-using Microsoft.DevTunnels.Ssh.Algorithms;
-
 namespace NetfxLibvirt.Transport;
 
 /// <summary>Verifies a remote SSH server's host key before
@@ -15,4 +13,4 @@ namespace NetfxLibvirt.Transport;
 /// accident.) Check against a known_hosts file, a pinned fingerprint, or a
 /// trust-on-first-use store; see <see cref="SshHostKeyVerifiers.DangerousAcceptAny"/>
 /// only for throwaway lab use.</summary>
-public delegate bool SshHostKeyVerifier(IKeyPair hostKey);
+public delegate bool SshHostKeyVerifier(SshHostKeyInfo hostKey);

@@ -10,4 +10,8 @@ public sealed class SshTransportException : Exception
     public SshTransportException(string message) : base(message)
     {
     }
+
+    public SshTransportException(string message, Exception innerException) : base(message, innerException)
+    {
+    }
 }

@@ -17,9 +17,9 @@ public sealed record SshTransportOptions
     /// <see cref="SshTransport.ConnectAsync"/> prefers the private key.</summary>
     public string? Password { get; init; }
 
-    /// <summary>Path to a private key file (any format
-    /// <c>Microsoft.DevTunnels.Ssh.Keys</c> supports: OpenSSH, PKCS#8,
-    /// PKCS#1, SEC1, SSH2 — see that package's README).</summary>
+    /// <summary>Path to a private key file (any format <c>SSH.NET</c>'s
+    /// <c>PrivateKeyFile</c> supports: OpenSSH, PKCS#1, PKCS#8, PuTTY,
+    /// ssh.com — RSA, DSA, ECDSA, and Ed25519 all included).</summary>
     public string? PrivateKeyPath { get; init; }
 
     /// <summary>Passphrase for <see cref="PrivateKeyPath"/>, if it's encrypted.</summary>

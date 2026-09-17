@@ -246,7 +246,41 @@ to outweigh `Tmds.Ssh`'s more modern (AOT-native) design and narrower
 maintainer base (242 stars) — an explicit, deliberate tradeoff, not a
 default.
 
-Implementation: `Transport/{SshTransport,SshTransportOptions,SshHostKeyVerifier,SshHostKeyVerifiers,SshTransportException}`.
+**Superseded 2026-09-17 — swapped to `SSH.NET`.** Story 12's real-host
+validation needed to authenticate as the user's actual lab account, whose
+only authorized key is Ed25519. `Microsoft.DevTunnels.Ssh.Keys`' importer
+only supports RSA/ECDSA — confirmed directly against its source (zero
+Ed25519 or OpenSSH-certificate files anywhere in its tree), not assumed.
+Checked whether upstream contribution could close this gap first rather
+than defaulting to a library swap: a complete, CLA-signed, cleanly
+mergeable PR adding Ed25519 to DevTunnels.Ssh's TypeScript side
+([microsoft/dev-tunnels-ssh#124](https://github.com/microsoft/dev-tunnels-ssh/pull/124))
+has had zero maintainer engagement for 6+ months, and multiple
+community-filed issues on that repo show the same pattern (#91 open since
+December 2023, zero comments) — measured evidence this wouldn't close on
+any useful timeline, and that PR doesn't even touch the .NET side this
+project actually depends on regardless. Forking DevTunnels.Ssh to add the
+coverage was also considered and rejected: its real technical strength is
+multi-channel/interactive session handling for its native Dev Tunnels use
+case, none of which this project uses — one plain exec channel is the
+entire requirement, so maintaining a patched fork for capability never
+exercised here is sprawl, not a fit. Both `Tmds.Ssh` and `SSH.NET` support
+Ed25519 and OpenSSH certificates; `SSH.NET` was picked on the same
+supply-chain-concentration reasoning that ruled `Tmds.Ssh` out the first
+time (one primary maintainer, small star count) — it's the larger,
+longer-established community project of the two. Its `SshCommand` type
+supplies exactly the primitive this transport needs — a raw,
+non-interactive, non-PTY duplex exec channel (`OutputStream` /
+`CreateInputStream()`) — not just the PTY-biased `ShellStream` a shallower
+read of its API might suggest. Full test suite (including the four
+Testcontainers-backed real-SSH tests) passed unchanged after the swap:
+245/0/6, same as before — the public `SshTransport`/`SshTransportOptions`
+surface didn't need to change shape, only `SshHostKeyVerifier`'s parameter
+type, now `SshHostKeyInfo` (a small library-independent record) instead of
+leaking a DevTunnels-specific key type — cheap insurance against this
+exact kind of swap happening a third time.
+
+Implementation: `Transport/{SshTransport,SshTransportOptions,SshHostKeyVerifier,SshHostKeyVerifiers,SshHostKeyInfo,SshCommandDuplexStream,SshTransportException}`.
 `SshTransport.ConnectAsync` opens an `SshClientSession`, requires the
 caller to supply a `VerifyHostKey` callback (no silent-trust default —
 deliberately unlike `virt-desktop`'s own `connection.go`, which uses

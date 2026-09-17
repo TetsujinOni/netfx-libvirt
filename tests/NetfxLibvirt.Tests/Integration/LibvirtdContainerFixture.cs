@@ -33,11 +33,12 @@ public sealed class LibvirtdContainerFixture : IAsyncLifetime
 
     public ushort SshHostPort => _container!.GetMappedPublicPort(SshPort);
 
-    // ECDSA, not ed25519: Microsoft.DevTunnels.Ssh.Keys' OpenSSH key
-    // importer only supports RSA/ECDSA — confirmed the hard way, an
-    // ed25519 test key failed every one of these tests with
-    // "No OpenSSH importer available for key algorithm: ssh-ed25519"
-    // before this was caught and fixed.
+    // ECDSA: originally forced by Microsoft.DevTunnels.Ssh.Keys' importer
+    // only supporting RSA/ECDSA (an ed25519 test key failed every one of
+    // these tests with "No OpenSSH importer available for key algorithm:
+    // ssh-ed25519"). SSH.NET (docs/plan.md story 11's later library swap)
+    // supports ed25519 too, but there's no reason to regenerate a key
+    // that already works — ECDSA is not itself the constraint anymore.
     public string PrivateKeyPath { get; } = Path.Combine(DockerDirectory, "id_ecdsa");
 
     // Copied here at build time (see this project's .csproj: <None Update="Integration\docker\**"

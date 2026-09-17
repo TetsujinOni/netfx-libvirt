@@ -47,15 +47,16 @@ Solution `netfx-libvirt.slnx` with four projects:
     domain socket via `System.Net.Sockets.Socket` +
     `UnixDomainSocketEndPoint`. This project's first real transport.
   - `Transport/SshTransport` — connects to a remote libvirtd over SSH,
-    built on **`Microsoft.DevTunnels.Ssh`** (Microsoft's own pure-managed
-    SSH2 client, chosen deliberately over SSH.NET/`Tmds.Ssh` for
-    supply-chain pedigree in this security-critical path — full reasoning
-    in `docs/plan.md` story 11). Doesn't replicate `virt-desktop`'s
+    built on **`SSH.NET`** (originally `Microsoft.DevTunnels.Ssh`; swapped
+    2026-09-17 once real-host validation needed Ed25519 auth, which
+    DevTunnels.Ssh's key importer doesn't support — full reasoning in
+    `docs/plan.md` story 11). Doesn't replicate `virt-desktop`'s
     `direct-streamlocal` channel-open; instead execs libvirt's own
-    `virt-ssh-helper <uri>` over a plain SSH exec channel — libvirt's own
-    official mechanism (confirmed by reading `src/remote/remote_ssh_helper.c`),
-    and the most universally-supported SSH capability there is. Requires an
-    explicit `VerifyHostKey` callback — no silent-trust default.
+    `virt-ssh-helper <uri>` over a plain SSH exec channel (a non-PTY
+    `SshCommand`, not `ShellStream`) — libvirt's own official mechanism
+    (confirmed by reading `src/remote/remote_ssh_helper.c`), and the most
+    universally-supported SSH capability there is. Requires an explicit
+    `VerifyHostKey` callback — no silent-trust default.
   - `ConnectListAllDomainsFlags`, `DomainState` — small hand-written enums
     for libvirt.h public API constants that have no entry in
     `remote_protocol.x` (same situation as `VIR_UUID_BUFLEN`, see
@@ -162,7 +163,7 @@ Solution `netfx-libvirt.slnx` with four projects:
 | Auth + open handshake | `LibvirtConnection.OpenAsync` — `AUTH_LIST` then `CONNECT_OPEN`; rejects any auth mechanism besides `AuthNone` with a named `NotSupportedException` rather than guessing. |
 | Local Unix-socket transport | `Transport/UnixSocketTransport`. **This project's first connection to a real, running libvirtd** — see Validation below. |
 | Domain operations | `LibvirtConnection.{ListDomainsAsync,StartDomainAsync,ShutdownDomainAsync,DestroyDomainAsync,GetDomainXmlAsync,DisconnectAsync}` — full parity with `virt-desktop`'s `hypervisorAPI`. |
-| SSH transport | `Transport/SshTransport` on `Microsoft.DevTunnels.Ssh` — execs libvirt's own `virt-ssh-helper` over a plain SSH exec channel rather than replicating `virt-desktop`'s `direct-streamlocal` channel-open. Validated against a real, self-built container — see Validation below. |
+| SSH transport | `Transport/SshTransport` on `SSH.NET` — execs libvirt's own `virt-ssh-helper` over a plain SSH exec channel rather than replicating `virt-desktop`'s `direct-streamlocal` channel-open. Validated against a real, self-built container — see Validation below. |
 | Container-based real-infra tests | `Integration/{docker,LibvirtdContainerFixture}` — a small self-authored image (Ubuntu 22.04 + `libvirt-daemon-system` + `openssh-server`, no qemu/kvm, no `--privileged`) built and started via `Testcontainers` on every test run. Zero host configuration; works the same for any contributor and in CI. |
 
 ## Validation so far
@@ -195,12 +196,26 @@ qemu/kvm, no `--privileged` — these tests only touch libvirt's
 `test:///default` null-hypervisor driver) built and started fresh on every
 test run, needing nothing but a working Docker daemon. Running it for real
 caught a genuine bug immediately: the first test key used ed25519, and
-`Microsoft.DevTunnels.Ssh.Keys`' OpenSSH importer only supports RSA/ECDSA
-— every test failed with a clear, specific exception. Regenerated as
-ECDSA P-256; all 4 `SshLibvirtdIntegrationTests` then passed against the
-real container: open, list domains, get XML, disconnect. These now run
-**by default** (no env var, no manual setup) whenever `dotnet test` runs on
-a machine with Docker.
+(at the time) `Microsoft.DevTunnels.Ssh.Keys`' OpenSSH importer only
+supported RSA/ECDSA — every test failed with a clear, specific exception.
+Regenerated as ECDSA P-256; all 4 `SshLibvirtdIntegrationTests` then
+passed against the real container: open, list domains, get XML,
+disconnect. These now run **by default** (no env var, no manual setup)
+whenever `dotnet test` runs on a machine with Docker.
+
+**SSH library swapped to `SSH.NET`, 2026-09-17.** Real-host validation
+(story 12) needed to authenticate as the actual lab account, whose only
+key is Ed25519 — the same gap the test fixture's key hit above, this time
+with no workaround available (it's not a key this project generates).
+`Microsoft.DevTunnels.Ssh` has zero Ed25519 or OpenSSH-certificate support
+anywhere in its source, confirmed directly; a mergeable, CLA-signed
+upstream PR adding it has sat with zero maintainer engagement for 6+
+months and doesn't even touch its .NET side. Swapped to `SSH.NET` (over
+`Tmds.Ssh`, on the same supply-chain-concentration reasoning that ruled it
+out originally) rather than forking DevTunnels.Ssh for capability
+(multi-channel/interactive sessions) this project never uses. Full test
+suite passed unchanged after the swap: 245/0/6, same as before — see
+`docs/plan.md` story 11 for the full trail.
 
 ## Next ready work
 

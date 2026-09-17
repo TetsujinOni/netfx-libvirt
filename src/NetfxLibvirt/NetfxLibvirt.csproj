@@ -8,9 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.DevTunnels.Ssh" Version="3.12.42" />
-    <PackageReference Include="Microsoft.DevTunnels.Ssh.Keys" Version="3.12.42" />
-    <PackageReference Include="Microsoft.DevTunnels.Ssh.Tcp" Version="3.12.42" />
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
   </ItemGroup>
 
 </Project>

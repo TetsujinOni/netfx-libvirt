@@ -43,7 +43,16 @@ public sealed class VirNetRpcClient
     /// <see cref="VirNetMessageType.Message"/> (event notifications) and
     /// <see cref="VirNetMessageType.Stream"/> (stream data) in practice. No
     /// decoding happens here; the handler gets the raw
-    /// <see cref="VirNetMessage"/>.</summary>
+    /// <see cref="VirNetMessage"/>.
+    ///
+    /// Carries no correlation to which logical operation "owns" it beyond
+    /// happening to arrive while some <see cref="CallAsync"/> was in
+    /// flight — a future subscriber (docs/plan.md's Events story) must
+    /// validate a decoded event's own contents (e.g. its callback/stream
+    /// ID) against what it actually registered for, not assume it's
+    /// scoped to whichever call's read loop happened to observe it.
+    /// Flagged during story 13's security review as a design note for
+    /// story 14, not a live issue — nothing subscribes to this yet.</summary>
     public event Action<VirNetMessage>? UnsolicitedMessageReceived;
 
     /// <summary>

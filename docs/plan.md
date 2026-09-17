@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-17 (stories 1–11 done and validated against real infra; story 11's fixture image now published to GHCR and pulled by default, both acquisition paths confirmed end-to-end. Story 12 — the real-lab-host finish line — is next and needs the user's input to proceed, see that story below.)
+**Last updated:** 2026-09-17 (stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -417,10 +417,58 @@ discipline catch a real bug above. `LibvirtdIntegrationTests` keeps its
 existing env-var/WSL-gated design for now, unaffected.
 
 **12. End-to-end validation against the real lab host.**
-Full `Connect → ListDomains → Start/Shutdown/Destroy → GetDomainXml →
-Disconnect` path over SSH against a real remote libvirtd
-(`qemu+ssh://root@<host>/system`, the sibling SPICE project's lab
-environment) — the actual "at parity with virt-desktop" finish line.
+
+**Status: read-only slice done and validated, 2026-09-17** — `Connect →
+ListDomains → GetDomainXml → Disconnect` against a real production
+libvirtd 12.0.0 (`qemu+ssh://tetsujinoni@srv-l-vm01/system`), authenticating
+with the user's actual Ed25519 account key (the reason for the SSH.NET
+swap above). `Start/Shutdown/Destroy` deliberately **not** exercised here:
+the host's `qemu:///system` has no disposable domain — every one of its 8
+domains is either real infrastructure (`Win2019-Dev-Oni`, `srv-w-app01`,
+`srv-l-db01`) or a maintained fixture another project (`uwp-virt-manager`'s
+SPICE suite) depends on staying running. That lifecycle RPC surface was
+already proven for real against WSL's `test:///default` in stories 6–10;
+what story 12 actually needed to prove — the SSH transport, the exec
+channel, and the RPC/error-decoding path against a real, differently
+versioned (12.0.0 vs. the 8.0.0 fixture baseline), real-domain-carrying
+daemon — is now proven too.
+
+Two real findings surfaced doing this for real rather than assuming it'd
+just work:
+
+1. **A validation-script bug, not a library bug, but a genuine API trap.**
+   The first two attempts failed with a real, correctly-decoded
+   `remote_error`: `Cannot recv data: Host key verification failed.:
+   Connection reset by peer`. Root-caused methodically rather than guessed:
+   confirmed `CONNECT_OPEN`'s encoding is byte-correct by running the exact
+   same call locally against a real (if empty) `qemu` driver in WSL over
+   `UnixSocketTransport` (succeeded); confirmed the SSH transport itself is
+   fine by running it against `test:///default` on the very same host over
+   the very same SSH path (succeeded); confirmed real libvirt clients
+   (`virsh`, `virt-manager`) hit no such error on the identical
+   `qemu+ssh://` path. The actual mistake: the validation script passed the
+   full `qemu+ssh://tetsujinoni@srv-l-vm01/system` string as
+   `LibvirtConnection.OpenAsync`'s `uri` argument instead of the
+   transport-stripped `qemu:///system` a real client sends — libvirtd's
+   qemu driver tried to interpret that string as *its own* outbound SSH
+   target and hit a real host-key failure trying to SSH to itself. Fixed
+   in the script; documented prominently on `LibvirtConnection.OpenAsync`
+   itself (`src/NetfxLibvirt/LibvirtConnection.cs`) so a future caller
+   doesn't repeat it — this is an easy trap precisely because the wrong
+   value produces a *plausible-sounding but totally unrelated* real error
+   rather than an obvious rejection.
+2. **`RemoteConnectOpenArgs`/`AUTH_LIST` behave identically against a real,
+   busy, multi-domain daemon as against an empty one** — no domain-count-
+   dependent surprises, no auth-mechanism divergence (`auth_unix_rw =
+   "none"` on this host too, confirmed directly, matching every prior
+   validation environment).
+
+`Start`/`Shutdown`/`Destroy` against a real lab host remains open —
+deliberately deferred, not blocked: it needs either a disposable domain
+provisioned specifically for this (out of scope to arrange unprompted
+against someone's live infrastructure) or accepting the stories 6–10
+WSL proof as sufficient for that RPC surface. Revisit only if a disposable
+target becomes available.
 
 ## After parity
 

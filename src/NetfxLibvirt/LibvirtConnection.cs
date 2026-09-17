@@ -40,6 +40,24 @@ public sealed class LibvirtConnection : IAsyncDisposable
     /// <c>qemu:///system</c>) — it identifies the driver on the other end,
     /// independent of how <paramref name="stream"/> itself got there.
     ///
+    /// **Never pass a transport-prefixed URI here** (e.g.
+    /// <c>qemu+ssh://user@host/system</c>) even when that's the URI the
+    /// caller's own connection started from — <paramref name="uri"/> is
+    /// what the already-connected daemon uses to pick a driver, not how the
+    /// caller reached it, and the daemon has no reason to know or care
+    /// about the transport. Real libvirt clients strip the transport/host
+    /// before sending this (see <c>remoteConnectFormatURI</c> in libvirt's
+    /// own <c>src/remote/remote_driver.c</c>) — passing the untouched
+    /// transport URI through by mistake doesn't just get rejected cleanly:
+    /// against a real <c>qemu</c> driver it can make libvirtd try to
+    /// interpret the string as *its own* SSH target and attempt a genuine
+    /// outbound SSH connection, failing with a real but wildly misleading
+    /// "host key verification failed" error that has nothing to do with the
+    /// caller's actual connection. Caught for real during story 12's
+    /// real-lab-host validation (<c>docs/plan.md</c>) — confirmed by
+    /// reproducing and then fixing the exact mistake in a validation
+    /// script, not by inspection alone.
+    ///
     /// Only <see cref="RemoteAuthType.RemoteAuthNone"/> is supported so far
     /// — matches every transport in <c>docs/plan.md</c>'s parity milestone
     /// (a local Unix socket, or an SSH tunnel that already authenticated at

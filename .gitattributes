@@ -4,6 +4,10 @@
 *.sh text eol=lf
 Dockerfile text eol=lf
 
+# GitHub Actions workflow YAML has embedded `run:` shell blocks executed
+# on Linux runners — same CRLF corruption risk as *.sh above.
+.github/workflows/*.yml text eol=lf
+
 # SSH key files: never line-ending-convert, treat as opaque bytes so a
 # Windows checkout can't subtly corrupt the PEM encoding.
 id_ecdsa binary

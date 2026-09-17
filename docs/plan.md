@@ -320,12 +320,41 @@ the image with a SHA-256 hash of its own input files (`Dockerfile`,
 repeated runs with unchanged inputs reuse the cached image (measured
 24s → 4s), and any edit to those files changes the hash, so a stale image
 can never silently outlive a Dockerfile change — no manual `docker image
-rm` needed. A separate GitHub Action publishing this image to GHCR ahead
-of time (raised and considered) would help a *cold* CI runner's first
-build too, but adds real complexity (a new workflow, registry permissions,
-a staleness story for a PR that edits the Dockerfile before it's been
-published) for a project with no CI workflow yet at all — worth revisiting
-once CI exists and its actual cost is measured, not before.
+rm` needed.
+
+**GHCR publish, implemented 2026-09-17:** the "revisit once CI exists"
+deferral above was reopened once the repo actually landed on GitHub
+(`TetsujinOni/netfx-libvirt`, public) and the cost argument was reframed
+without needing CI to exist first: this is the Release-Reuse Equivalence
+Principle applied to a build artifact instead of a code package — the
+image's content changes on the order of "a Dockerfile edit" or "a
+backported sshd/libvirtd CVE," while the old approach rebuilt it on the
+order of "a test invocation." That mismatch costs more, not less, as
+contributor count grows (N independent local builds of unchanged content
+vs. one centralized build + N cheap pulls). `.github/workflows/publish-test-fixture-image.yml`
+builds and pushes to `ghcr.io/tetsujinoni/netfx-libvirt/test-fixture-libvirtd-sshd:<hash>`
+(same content-hash tag scheme as the local build, computed identically via
+`cat Dockerfile entrypoint.sh id_ecdsa.pub | sha256sum`) on any push to
+`main` touching the Docker context, skipping the build if that hash is
+already published. Image acquisition was split out of
+`LibvirtdContainerFixture` into `LibvirtdFixtureImageAcquisition` (own
+file): it tries the registry pull first by default (`PullPolicy.Missing`),
+falling back to a local build on any failure (image not published yet for
+a PR that just edited the Dockerfile, no network, fork without registry
+access) — no separate "staleness story" needed, since a content-hash tag
+that doesn't exist in the registry just falls through to the same local
+build path that was already the only path before this. Force local build
+directly (skip the doomed pull attempt while iterating on the Dockerfile)
+via `NETFX_LIBVIRT_TEST_FORCE_LOCAL_BUILD=1`.
+
+**Known gap:** GHCR packages pushed via a repo's own `GITHUB_TOKEN`
+typically default to *private* visibility even when the repo itself is
+public, and the workflow doesn't (and via `GITHUB_TOKEN` can't reliably)
+flip that automatically. Until the package's visibility is manually set to
+public in its GHCR settings after the first publish, external
+contributors/forks will get a 401 on the pull attempt and silently fall
+back to local build — correct behavior, just not the fast path. One-time
+manual step, not a code TODO.
 
 **Deliberately not done yet:** migrating `LibvirtdIntegrationTests` (the
 raw local Unix-socket transport, stories 6–10) to the same container

@@ -1,0 +1,70 @@
+name: Publish test fixture image
+
+# Publishes the throwaway libvirtd+sshd container image that
+# tests/NetfxLibvirt.Tests/Integration uses (see LibvirtdFixtureImageAcquisition.cs)
+# to GHCR, tagged by a hash of its own input files. This lets every
+# contributor's local test run and every CI run pull an already-built image
+# instead of independently rebuilding it — cheap because this image's
+# content only changes on the order of "a Dockerfile edit" or "a backported
+# CVE," not on the order of "a test run." See docs/plan.md's transport
+# section and feedback_cache-when-real-thing-unneeded in project memory for
+# the reasoning.
+#
+# Package name deliberately says "test-fixture": this is not a product
+# image, and nobody should mistake it for one while browsing GHCR.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tests/NetfxLibvirt.Tests/Integration/docker/**"
+      - ".github/workflows/publish-test-fixture-image.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: publish-test-fixture-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        working-directory: tests/NetfxLibvirt.Tests/Integration/docker
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image ref
+        id: image
+        run: |
+          hash=$(cat Dockerfile entrypoint.sh id_ecdsa.pub | sha256sum | cut -c1-12)
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          ref="ghcr.io/${owner}/netfx-libvirt/test-fixture-libvirtd-sshd:${hash}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether this content hash is already published
+        id: check
+        run: |
+          if docker manifest inspect "${{ steps.image.outputs.ref }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/NetfxLibvirt.Tests/Integration/docker
+          push: true
+          tags: ${{ steps.image.outputs.ref }}

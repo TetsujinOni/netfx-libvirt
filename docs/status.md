@@ -35,7 +35,9 @@ Solution `netfx-libvirt.slnx` with four projects:
     with an auto-incrementing serial number, reads back the matching
     `Reply`, and either returns the raw payload or throws
     `Rpc/LibvirtRpcException` (decoded from the generated `RemoteError` DTO)
-    on a `VIR_NET_ERROR` reply. Half-duplex by design — see its class doc.
+    on a `VIR_NET_ERROR` reply. One call in flight at a time, but tolerant
+    of unsolicited `Message`/`Stream` frames interleaved with a reply — see
+    its class doc and `docs/plan.md`'s Events story.
   - `LibvirtConnection` — the full session surface, deliberately matching
     `virt-desktop`'s own `hypervisorAPI` interface (`hypervisor.go`):
     `OpenAsync` (AUTH_LIST + CONNECT_OPEN; only `AuthNone` supported, named

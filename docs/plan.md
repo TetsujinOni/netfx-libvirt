@@ -112,9 +112,11 @@ XDR-encoded args) with an auto-incrementing serial number, awaits the
 matching `Reply` frame via the existing `VirNetMessageFraming`, and either
 hands back the raw reply payload or throws a `LibvirtRpcException` (new,
 `src/NetfxLibvirt/Rpc/LibvirtRpcException.cs`) built from `RemoteError` when
-`VirNetMessageStatus.Error` comes back. Half-duplex by design (one call in
-flight at a time) — good enough for the parity milestone, revisit if events/
-streams need concurrent in-flight messages later. Tested hermetically
+`VirNetMessageStatus.Error` comes back. One call in flight at a time from
+the caller's side — but tolerant of unsolicited `Message`/`Stream` frames
+arriving interleaved with a call's reply (fixed 2026-09-17, see the Events
+story below; originally assumed the very next frame read was always the
+reply). Tested hermetically
 (`VirNetRpcClientTests`) over a small fake duplex `Stream`
 (`FakeDuplexStream`, `tests/NetfxLibvirt.Tests/Rpc/`) — no network, no real
 libvirtd, same discipline as the existing framing tests.
@@ -470,9 +472,101 @@ against someone's live infrastructure) or accepting the stories 6–10
 WSL proof as sufficient for that RPC surface. Revisit only if a disposable
 target becomes available.
 
-## After parity
+## After parity: protocol breadth toward go-libvirt-level coverage
 
 Once 1–12 are done, `netfx-libvirt` does everything `virt-desktop` does
-today. Further procedure coverage (toward go-libvirt-level breadth), TCP/TLS
-transports, and anything past this list belongs in a follow-up pass of this
-same plan, not bolted on ahead of parity.
+today. This phase is about the rest of `remote_protocol.x` — go-libvirt's
+own generated bindings cover 454 of the real file's 456 `REMOTE_PROC_*`
+procedures (confirmed by reading `remote_protocol.gen.go` directly, not
+assumed from its README), so "go-libvirt-level breadth" really does mean
+the whole surface eventually, not a curated subset. 12 procedures are
+already emitted (the parity set); roughly 444 remain, grouped below by
+libvirt object type, counts cross-checked against both the vendored `.x`
+file and go-libvirt's real coverage.
+
+| Epic | Procedures | Notes |
+|---|---|---|
+| Storage pools | 23 | self-contained |
+| Storage volumes | 15 | depends on pools |
+| Networks | 22 | self-contained |
+| Network ports | 6 | depends on Networks |
+| Node devices | 22 | self-contained |
+| Node (host CPU/mem/etc.) | 15 | self-contained |
+| Interfaces (host netcfg) | 11 | self-contained |
+| NWFilter + bindings | 10 | self-contained |
+| Secrets | 9 | self-contained |
+| Domain — breadth (get/set/block/lifecycle/save-restore) | ~155 | huge — its own multi-epic sub-plan when reached |
+| Domain snapshots | 13 | depends on Domain breadth basics |
+| Domain checkpoints | 6 | depends on snapshots |
+| Domain migration | 25 | complex, multi-step, higher risk — last |
+| Auth (SASL/Polkit) | 5 | only needed past AuthNone-only environments |
+| Events (register/deregister + delivery) | 69 | **foundational plumbing**, see below — most of this batch deferred |
+| Connect (misc: capabilities, feature-support, CPU baseline/compare, storage-source-finding, …) | ~65 | mixed; picked up alongside whichever epic above actually needs each one |
+
+**Priority order** (utility-for-a-general-admin-tool first, least new
+plumbing first): risk-reduce the Events architecture change now (stories
+13–14 below) while the codebase is still modest, **then** Storage pools →
+Storage volumes → Networks/ports → Node devices → Node → Domain breadth
+(own sub-plan) → Interfaces/NWFilter/Secrets → Auth → Migration, with the
+remaining 60+ event procedures picked up opportunistically per-epic rather
+than as one big batch — e.g. storage-pool lifecycle events land as part of
+the Storage pools epic, not deferred to a separate "all events" pass.
+
+### 13. Remove the RPC client's half-duplex assumption.
+
+**Status: done, 2026-09-17.** Pulled forward deliberately, ahead of any
+epic above, on a risk-management basis: the interleaved-frame problem only
+gets more expensive to retrofit the more calling code accumulates on top
+of the old assumption, so fix it while the surface is still small (this
+plan's 12 procedures) rather than after Storage/Network/Domain breadth
+triples it.
+
+`VirNetRpcClient.CallAsync` used to assume the very next frame read after
+sending a call was that call's reply — true only when nothing else talks
+on the connection. Real connections can deliver a `Message` (event) or
+`Stream` frame unprompted, interleaved with an in-flight call's reply.
+Fixed by having `CallAsync` keep reading frames in a loop until one
+actually matches its own serial, raising anything else via a new
+`UnsolicitedMessageReceived` event instead of misinterpreting it as the
+reply (or, for a reply with someone else's serial — shouldn't happen given
+one call in flight at a time, but isn't an event either — silently
+dropping it and continuing to wait for its own).
+
+Deliberately still cooperative, not a true independent background reader:
+nothing reads the stream while no call is in flight, so an event that
+arrives with no call currently awaiting a reply is invisible until the
+next call happens to be made. A full push-based background reader (a
+persistent read loop, a `ConcurrentDictionary<serial, TaskCompletionSource>`
+for true overlapping in-flight calls) was drafted and deliberately
+backed out: it requires the test double (`FakeDuplexStream`) to model a
+real socket's blocking-read-until-data-or-close semantics instead of
+EOF-on-drained-queue, and every existing test's "queue all expected
+replies, then make all the calls" pattern would need rewriting to
+interleave queuing with calling — real work, for a capability (events
+delivered with zero calls in flight) nothing in this plan needs yet. Keep
+it in mind if a future epic genuinely needs live push delivery outside an
+active call; don't build it speculatively now.
+
+Tested hermetically: `FakeDuplexStream` gained `QueueMessage` (queues an
+unsolicited `Message`-type frame, serial 0, matching how a real server
+frames one) alongside the existing `QueueReply`. Two new
+`VirNetRpcClientTests`: an unsolicited message queued before the real
+reply is raised via `UnsolicitedMessageReceived` and doesn't corrupt the
+call's own result; a reply for the wrong serial queued before the right
+one is silently dropped, not raised as unsolicited. Full suite:
+252 total, 0 failed, 6 skipped (WSL-gated), matching the pre-change
+baseline.
+
+### 14. Validate the architecture with two event procedures.
+
+**Status: not started.** `REMOTE_PROC_CONNECT_DOMAIN_EVENT_CALLBACK_REGISTER_ANY`
+/ `..._DEREGISTER_ANY` plus decoding one real event payload
+(`remote_domain_event_callback_lifecycle_msg` — domain start/stop/etc.
+state transitions, the simplest and most universally-supported event
+type) against the existing Testcontainers `test:///default` fixture:
+register, then exercise `StartDomainAsync`/`DestroyDomainAsync` (already
+proven, stories 6–10) and confirm the lifecycle event actually arrives via
+`UnsolicitedMessageReceived` while those calls are in flight — proving
+story 13's fix end-to-end against a real daemon, not just hermetically.
+The other 60+ event procedures stay deferred, picked up per-epic later
+(see the priority-order note above) rather than as a follow-on batch here.

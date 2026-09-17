@@ -6,9 +6,10 @@ namespace NetfxLibvirt.Tests.Rpc;
 /// <summary>A minimal duplex <see cref="Stream"/> for testing request/reply
 /// RPC code: writes go to one buffer (inspectable via
 /// <see cref="ReadAllSentFrames"/>), reads are served from a separately
-/// pre-queued buffer (via <see cref="QueueReply"/>) — exactly the shape
-/// <see cref="VirNetRpcClient"/> needs (write a call, then read a reply),
-/// without needing a real socket pair to simulate it.</summary>
+/// pre-queued buffer (via <see cref="QueueReply"/>/<see cref="QueueMessage"/>)
+/// — exactly the shape <see cref="VirNetRpcClient"/> needs (write a call,
+/// then read frames until the matching reply turns up), without needing a
+/// real socket pair to simulate it.</summary>
 internal sealed class FakeDuplexStream : Stream
 {
     private readonly MemoryStream _outgoing = new();
@@ -24,7 +25,27 @@ internal sealed class FakeDuplexStream : Stream
             Type: VirNetMessageType.Reply,
             Serial: serial,
             Status: status);
+        QueueFrame(header, payload);
+    }
 
+    /// <summary>Queues an unsolicited <see cref="VirNetMessageType.Message"/>
+    /// frame — real events arrive this way, unprompted and not tied to any
+    /// call's serial (hence <c>serial: 0</c>, matching a real server's own
+    /// framing for these).</summary>
+    public void QueueMessage(int procedure, byte[] payload)
+    {
+        var header = new VirNetMessageHeader(
+            Prog: (uint)RemoteProtocolConstants.RemoteProgram,
+            Vers: (uint)RemoteProtocolConstants.RemoteProtocolVersion,
+            Proc: procedure,
+            Type: VirNetMessageType.Message,
+            Serial: 0,
+            Status: VirNetMessageStatus.Ok);
+        QueueFrame(header, payload);
+    }
+
+    private void QueueFrame(VirNetMessageHeader header, byte[] payload)
+    {
         // Always append at the end; ReadAsync below restores its own read
         // cursor (_incomingReadPosition) before every read regardless of
         // wherever this leaves _incoming.Position.

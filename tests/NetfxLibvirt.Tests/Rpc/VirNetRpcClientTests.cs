@@ -77,14 +77,47 @@ public class VirNetRpcClientTests
     }
 
     [Fact]
-    public async Task CallAsync_MismatchedSerial_Throws()
+    public async Task CallAsync_UnsolicitedMessageArrivesBeforeReply_DoesNotCorruptTheCall()
     {
+        // A real connection can deliver an event notification interleaved
+        // with an in-flight call's reply. The read loop must demultiplex by
+        // frame type/serial, not by read order, so this must not be
+        // mistaken for CONNECT_OPEN's reply.
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 99, VirNetMessageStatus.Ok, payload: []);
+        stream.QueueMessage(procedure: 999, payload: [1, 2, 3]);
+        stream.QueueReply(serial: 1, VirNetMessageStatus.Ok, payload: []);
         var client = new VirNetRpcClient(stream);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => client.CallAsync((int)RemoteProcedure.RemoteProcConnectOpen, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken));
+        VirNetMessage? received = null;
+        client.UnsolicitedMessageReceived += m => received = m;
+
+        var payload = await client.CallAsync((int)RemoteProcedure.RemoteProcConnectOpen, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+
+        Assert.Empty(payload);
+        Assert.NotNull(received);
+        Assert.Equal(VirNetMessageType.Message, received.Value.Header.Type);
+        Assert.Equal(999, received.Value.Header.Proc);
+        Assert.Equal(new byte[] { 1, 2, 3 }, received.Value.Payload);
+    }
+
+    [Fact]
+    public async Task CallAsync_MismatchedSerialReplyBeforeRealOne_IsDroppedNotRaisedAsUnsolicited()
+    {
+        // A reply for a serial nobody's waiting on (shouldn't happen given
+        // one call in flight at a time, but isn't an event either) must be
+        // dropped silently and not stop CallAsync from finding its own
+        // reply right after it.
+        var stream = new FakeDuplexStream();
+        stream.QueueReply(serial: 99, VirNetMessageStatus.Ok, payload: []);
+        stream.QueueReply(serial: 1, VirNetMessageStatus.Ok, payload: []);
+        var client = new VirNetRpcClient(stream);
+
+        var raised = false;
+        client.UnsolicitedMessageReceived += _ => raised = true;
+
+        await client.CallAsync((int)RemoteProcedure.RemoteProcConnectOpen, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+
+        Assert.False(raised);
     }
 
     [Fact]

@@ -10,12 +10,23 @@ namespace NetfxLibvirt.Rpc;
 /// <see cref="LibvirtRpcException"/> carrying the real <c>remote_error</c>
 /// payload, rather than handing back a bare status code.
 ///
-/// Half-duplex by design for now: a call is sent, then exactly one frame is
-/// read back and assumed to be its reply. Event/stream messages
-/// (<see cref="VirNetMessageType.Message"/>/<see cref="VirNetMessageType.Stream"/>,
-/// which arrive unprompted between calls on a real connection) aren't
-/// handled yet — see docs/plan.md's "After parity" section. This is enough
-/// for the request/reply procedures the parity milestone needs.
+/// A real connection can deliver a <see cref="VirNetMessageType.Message"/>
+/// (event notification) or <see cref="VirNetMessageType.Stream"/> frame
+/// *unprompted*, interleaved with an in-flight call's reply — an earlier
+/// version assumed the very next frame read after sending a call was always
+/// that call's reply, which silently broke the moment anything else talked
+/// on the connection. <see cref="CallAsync"/> now keeps reading frames
+/// until one actually matches its own serial, raising anything else via
+/// <see cref="UnsolicitedMessageReceived"/> instead of misinterpreting it.
+///
+/// Still cooperative, not a true independent background reader: nothing
+/// reads the stream while no call is in flight, so an event that arrives
+/// with no call currently awaiting a reply is invisible until the next
+/// call happens to be made. That's an intentional, scoped-down version of
+/// this fix — the real prerequisite for the two event procedures
+/// docs/plan.md's Events story validates the architecture with — not a
+/// full push-based event subscription model, which stays out of scope
+/// until something beyond that validation slice actually needs it.
 /// </summary>
 public sealed class VirNetRpcClient
 {
@@ -26,6 +37,14 @@ public sealed class VirNetRpcClient
     {
         _stream = stream;
     }
+
+    /// <summary>Raised from within <see cref="CallAsync"/> for any frame
+    /// read that isn't the reply it's waiting for —
+    /// <see cref="VirNetMessageType.Message"/> (event notifications) and
+    /// <see cref="VirNetMessageType.Stream"/> (stream data) in practice. No
+    /// decoding happens here; the handler gets the raw
+    /// <see cref="VirNetMessage"/>.</summary>
+    public event Action<VirNetMessage>? UnsolicitedMessageReceived;
 
     /// <summary>
     /// Sends <paramref name="procedure"/> with the given already-XDR-encoded
@@ -47,22 +66,34 @@ public sealed class VirNetRpcClient
 
         await VirNetMessageFraming.WriteFrameAsync(_stream, callHeader, argsPayload, cancellationToken).ConfigureAwait(false);
 
-        var reply = await VirNetMessageFraming.ReadFrameAsync(_stream, cancellationToken).ConfigureAwait(false);
-
-        if (reply.Header.Serial != serial)
+        while (true)
         {
-            throw new InvalidOperationException(
-                $"Reply serial {reply.Header.Serial} does not match call serial {serial} — out-of-order or interleaved messages aren't supported yet.");
+            var frame = await VirNetMessageFraming.ReadFrameAsync(_stream, cancellationToken).ConfigureAwait(false);
+
+            if (frame.Header.Type is not (VirNetMessageType.Reply or VirNetMessageType.ReplyWithFds))
+            {
+                UnsolicitedMessageReceived?.Invoke(frame);
+                continue;
+            }
+
+            if (frame.Header.Serial != serial)
+            {
+                // A reply for some other serial while we're waiting for ours
+                // shouldn't happen given one call in flight at a time, but
+                // it's not an event either — drop it, not raise it as
+                // unsolicited, and keep waiting for our own reply.
+                continue;
+            }
+
+            return frame.Header.Status switch
+            {
+                VirNetMessageStatus.Ok => frame.Payload,
+                VirNetMessageStatus.Error => throw DecodeError(frame.Payload),
+                VirNetMessageStatus.Continue => throw new NotSupportedException(
+                    "a VIR_NET_CONTINUE reply means this call opened a stream — streaming isn't supported yet."),
+                _ => throw new InvalidOperationException($"Unknown reply status {frame.Header.Status}."),
+            };
         }
-
-        return reply.Header.Status switch
-        {
-            VirNetMessageStatus.Ok => reply.Payload,
-            VirNetMessageStatus.Error => throw DecodeError(reply.Payload),
-            VirNetMessageStatus.Continue => throw new NotSupportedException(
-                "a VIR_NET_CONTINUE reply means this call opened a stream — streaming isn't supported yet."),
-            _ => throw new InvalidOperationException($"Unknown reply status {reply.Header.Status}."),
-        };
     }
 
     private static LibvirtRpcException DecodeError(byte[] payload) =>

@@ -11,7 +11,7 @@ on its own, without needing the stories after it to make sense.
 
 The concrete goal for this phase isn't "cover more of `remote_protocol.x`"
 in the abstract — it's matching what the sibling Go/Wails app
-(`D:\work\virt-desktop`) already does today, so `uwp-virt-manager` (or
+(`D:\work\virt-desktop`) already does today, so `avalonia-virt-manager` (or
 whatever consumes this library) has no functional gap versus that app. Read
 directly from its source, not from memory of it:
 
@@ -32,7 +32,7 @@ directly from its source, not from memory of it:
 Explicitly **not** in scope here (Wails-app-level, not libvirt-protocol-level):
 credential keyring (`secrets.go`), saved-host storage (`hoststore.go`), the
 noVNC WebSocket bridge (`novnc_ws_bridge.go`, `console.go`) — VNC/SPICE
-console access is `uwp-virt-manager`'s job, not this library's.
+console access is `avalonia-virt-manager`'s job, not this library's.
 
 Tracing those Go calls down to the actual RPC procedures they use (verified
 against the real `remote_protocol.x`, not assumed):
@@ -427,7 +427,7 @@ with the user's actual Ed25519 account key (the reason for the SSH.NET
 swap above). `Start/Shutdown/Destroy` deliberately **not** exercised here:
 the host's `qemu:///system` has no disposable domain — every one of its 8
 domains is either real infrastructure (`Win2019-Dev-Oni`, `srv-w-app01`,
-`srv-l-db01`) or a maintained fixture another project (`uwp-virt-manager`'s
+`srv-l-db01`) or a maintained fixture another project (`avalonia-virt-manager`'s
 SPICE suite) depends on staying running. That lifecycle RPC surface was
 already proven for real against WSL's `test:///default` in stories 6–10;
 what story 12 actually needed to prove — the SSH transport, the exec

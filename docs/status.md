@@ -9,8 +9,8 @@ no P/Invoke, no native `libvirt.so`/`libvirt-0.dll` dependency. Same
 methodology as `digitalocean/go-libvirt` (Apache 2.0, pure Go, no cgo): read
 libvirt's real upstream `.x` XDR protocol files and port the algorithm, not
 the C code. See `docs/libvirt-netfx-feasibility.md` and
-`docs/full-admin-tool-gap-analysis.md` in the sibling `uwp-virt-manager`
-repo (`D:\work\uwp-virt-manager`) for the full research/decision record and
+`docs/full-admin-tool-gap-analysis.md` in the sibling `avalonia-virt-manager`
+repo (`D:\work\avalonia-virt-manager`) for the full research/decision record and
 motivation behind this project — this repo is a standalone spin-off, not a
 subdirectory of that one.
 
@@ -159,7 +159,7 @@ Solution `netfx-libvirt.slnx` with four projects:
 
 | Task | What was built |
 |---|---|
-| Repo setup | Solution skeleton mirroring `uwp-virt-manager`'s own pattern (xUnit v3 + Microsoft.Testing.Platform, `global.json` pinning the MTP test runner). |
+| Repo setup | Solution skeleton mirroring `avalonia-virt-manager`'s own pattern (xUnit v3 + Microsoft.Testing.Platform, `global.json` pinning the MTP test runner). |
 | XDR runtime | `XdrWriter`/`XdrReader` — RFC 4506 encode/decode, unit-tested exhaustively (byte-literal + round-trip), including bounds checking against a declared-length-exceeds-remaining-bytes attack (a length claiming more data than the buffer actually holds throws rather than over-reading). |
 | `virNetMessageHeader` | `VirNetMessageHeader` struct, `VirNetMessageType`/`VirNetMessageStatus` enums — values confirmed byte-exact against the real upstream `.x` file, not guessed. |
 | Message framing | `VirNetMessageFraming.{EncodeFrame,WriteFrameAsync,ReadFrameAsync}` — confirmed against `go-libvirt`'s own `socket.go` that the 4-byte length prefix counts itself, not just header+payload. |
@@ -243,5 +243,5 @@ story 12 — see `plan.md`'s "After parity" section.
 
 Full libvirt API coverage, storage pool/network management, VM
 creation/provisioning, any UI. See
-`docs/libvirt-netfx-feasibility.md` in the sibling `uwp-virt-manager` repo
+`docs/libvirt-netfx-feasibility.md` in the sibling `avalonia-virt-manager` repo
 for the full scope rationale.

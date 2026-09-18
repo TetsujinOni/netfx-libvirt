@@ -1,20 +1,24 @@
 namespace NetfxLibvirt.Rpc;
 
+/// <summary>The result of <see cref="VirNetRpcClient.OpenStreamAsync"/>: the opening call's own reply payload (decode with the matching generated <c>*_ret</c> DTO if the procedure has one, e.g. <c>DOMAIN_SCREENSHOT</c>'s MIME type — otherwise ignore it) plus the opened <see cref="Rpc.VirNetRpcStream"/>.</summary>
+public readonly record struct VirNetRpcStreamResult(byte[] ReplyPayload, VirNetRpcStream Stream);
+
 /// <summary>
 /// A libvirt RPC stream (<c>src/rpc/virnetprotocol.x</c>'s
 /// <see cref="VirNetMessageType.Stream"/> message type), opened by
-/// <see cref="VirNetRpcClient.OpenStreamAsync"/> when a call's reply carries
-/// <see cref="VirNetMessageStatus.Continue"/> instead of an ordinary payload
-/// — e.g. <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c>, which tunnels a domain's
-/// raw VNC/SPICE graphics protocol bytes over the *existing* RPC connection
-/// rather than a second socket.
+/// <see cref="VirNetRpcClient.OpenStreamAsync"/> alongside a stream-opening
+/// call's ordinary reply — e.g. <c>REMOTE_PROC_DOMAIN_OPEN_CONSOLE</c>,
+/// which tunnels a domain's serial console bytes over the *existing* RPC
+/// connection rather than a second socket (see
+/// <see cref="VirNetRpcClient"/>'s own doc for which procedures this
+/// applies to, and why <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c> is *not* one
+/// of them).
 ///
 /// Frame shape confirmed against <c>digitalocean/go-libvirt</c>'s own
 /// <c>Socket.SendStream</c>/<c>processIncomingStream</c> (see
-/// <c>reference/go-libvirt-src/socket.go</c> — <see cref="VirNetRpcClient"/>
-/// only special-cases the *first* reply's <see cref="VirNetMessageStatus.Continue"/>;
-/// everything after that, including a real, documented libvirtd quirk, lives
-/// here):
+/// <c>reference/go-libvirt-src/socket.go</c>) — <see cref="VirNetRpcClient"/>
+/// handles the opening call's own ordinary reply; everything after that,
+/// including a real, documented libvirtd quirk, lives here:
 ///
 /// - Outbound (<see cref="WriteAsync(ReadOnlyMemory{byte},CancellationToken)"/>):
 ///   each chunk is a <see cref="VirNetMessageType.Stream"/>/

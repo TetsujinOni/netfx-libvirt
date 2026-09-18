@@ -121,13 +121,17 @@ public class VirNetRpcClientTests
     }
 
     [Fact]
-    public async Task CallAsync_ContinueReply_ThrowsNotSupported()
+    public async Task CallAsync_ContinueReply_ThrowsBecauseThatsNeverValidOnAReply()
     {
+        // Per virnetprotocol.x's own doc comment (confirmed against libvirt's
+        // real client dispatcher, virnetclient.c): VIR_NET_CONTINUE only
+        // ever appears on VIR_NET_STREAM-typed frames, never on the reply
+        // to a call itself.
         var stream = new FakeDuplexStream();
         stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
 
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await Assert.ThrowsAsync<InvalidOperationException>(
             () => client.CallAsync((int)RemoteProcedure.RemoteProcDomainOpenConsole, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken));
     }
 }

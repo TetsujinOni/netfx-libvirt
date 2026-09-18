@@ -5,13 +5,22 @@ using NetfxLibvirt.Xdr;
 namespace NetfxLibvirt.Tests.Rpc;
 
 /// <summary>Hermetic tests for <see cref="VirNetRpcClient.OpenStreamAsync"/>
-/// and <see cref="VirNetRpcStream"/> — the VIR_NET_CONTINUE/STREAM frame
-/// handling <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c> (and any future
-/// stream-opening procedure) needs, verified against the exact frame shape
-/// confirmed in <c>reference/go-libvirt-src/socket.go</c> (see
-/// <see cref="VirNetRpcStream"/>'s own class doc).</summary>
+/// and <see cref="VirNetRpcStream"/> — the <c>VIR_NET_STREAM</c> frame
+/// handling real stream-opening procedures need (e.g.
+/// <c>REMOTE_PROC_DOMAIN_OPEN_CONSOLE</c>, used here as the example — see
+/// <see cref="VirNetRpcClient"/>'s own doc for why
+/// <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c> is *not* one of these), verified
+/// against the exact frame shape confirmed in
+/// <c>reference/go-libvirt-src/socket.go</c> and libvirt's real
+/// <c>virnetclient.c</c> dispatcher (see <see cref="VirNetRpcStream"/>'s own
+/// class doc). The opening call's reply is an ordinary
+/// <see cref="VirNetMessageStatus.Ok"/>/<see cref="VirNetMessageStatus.Error"/>
+/// — never <see cref="VirNetMessageStatus.Continue"/>, which only appears on
+/// <see cref="VirNetMessageType.Stream"/>-typed frames.</summary>
 public class VirNetRpcStreamTests
 {
+    private const int ExampleStreamProcedure = (int)RemoteProcedure.RemoteProcDomainOpenConsole;
+
     private static byte[] EncodeError(RemoteError error)
     {
         var writer = new XdrWriter();
@@ -25,20 +34,42 @@ public class VirNetRpcStreamTests
         Dom = null, Str1 = null, Str2 = null, Str3 = null, Int1 = 0, Int2 = 0, Net = null,
     };
 
+    /// <summary>Queues the ordinary Ok reply a real stream-opening call gets, then opens the stream.</summary>
+    private static async Task<VirNetRpcStream> OpenStreamAsync(FakeDuplexStream stream, VirNetRpcClient client, CancellationToken cancellationToken)
+    {
+        stream.QueueReply(serial: 1, VirNetMessageStatus.Ok, payload: []);
+        var result = await client.OpenStreamAsync(ExampleStreamProcedure, ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+        return result.Stream;
+    }
+
     [Fact]
-    public async Task OpenStreamAsync_ContinueReply_ReturnsStreamInsteadOfThrowing()
+    public async Task OpenStreamAsync_OkReply_ReturnsStream()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
 
-        await using var rpcStream = await client.OpenStreamAsync(
-            (int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
 
         Assert.NotNull(rpcStream);
         var sent = stream.ReadAllSentFrames();
         Assert.Equal(VirNetMessageType.Call, sent[0].Header.Type);
-        Assert.Equal((int)RemoteProcedure.RemoteProcDomainOpenGraphics, sent[0].Header.Proc);
+        Assert.Equal(ExampleStreamProcedure, sent[0].Header.Proc);
+    }
+
+    [Fact]
+    public async Task OpenStreamAsync_ReturnsTheReplyPayloadAlongsideTheStream()
+    {
+        // Some stream-opening procedures still carry real data in their
+        // ordinary reply (e.g. DOMAIN_SCREENSHOT's MIME type) -- the reply
+        // isn't just a bare acknowledgment.
+        var stream = new FakeDuplexStream();
+        stream.QueueReply(serial: 1, VirNetMessageStatus.Ok, payload: [1, 2, 3]);
+        var client = new VirNetRpcClient(stream);
+
+        var result = await client.OpenStreamAsync(ExampleStreamProcedure, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await using var _ = result.Stream;
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, result.ReplyPayload);
     }
 
     [Fact]
@@ -49,41 +80,39 @@ public class VirNetRpcStreamTests
         var client = new VirNetRpcClient(stream);
 
         var ex = await Assert.ThrowsAsync<LibvirtRpcException>(
-            () => client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken));
+            () => client.OpenStreamAsync(ExampleStreamProcedure, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken));
 
         Assert.Equal(42, ex.Error.Code);
     }
 
     [Fact]
-    public async Task OpenStreamAsync_OkReply_ThrowsBecauseThisProcedureShouldAlwaysStream()
+    public async Task OpenStreamAsync_ContinueReply_ThrowsBecauseThatsNeverValidOnAReply()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Ok, payload: []);
+        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken));
+            () => client.OpenStreamAsync(ExampleStreamProcedure, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public async Task OpenStreamAsync_WhileAnotherStreamIsOpen_Throws()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
-        await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken));
+            () => client.OpenStreamAsync(ExampleStreamProcedure, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public async Task CallAsync_WhileStreamIsOpen_Throws()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
-        await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => client.CallAsync((int)RemoteProcedure.RemoteProcConnectClose, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken));
@@ -93,9 +122,8 @@ public class VirNetRpcStreamTests
     public async Task DisposingStream_ReleasesClientForFurtherCalls()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
-        var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
         await rpcStream.DisposeAsync();
 
         stream.QueueReply(serial: 2, VirNetMessageStatus.Ok, payload: []);
@@ -106,12 +134,11 @@ public class VirNetRpcStreamTests
     public async Task ReadAsync_ConcatenatesDataAcrossMultipleContinueFrames()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
+        var client = new VirNetRpcClient(stream);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
         stream.QueueStream(serial: 1, VirNetMessageStatus.Continue, [1, 2, 3]);
         stream.QueueStream(serial: 1, VirNetMessageStatus.Continue, [4, 5]);
         stream.QueueStream(serial: 1, VirNetMessageStatus.Ok, []);
-        var client = new VirNetRpcClient(stream);
-        await using var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
 
         var buffer = new byte[10];
         var total = 0;
@@ -128,11 +155,10 @@ public class VirNetRpcStreamTests
     public async Task ReadAsync_SmallerCallerBufferThanFramePayload_DrainsFrameAcrossMultipleReads()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
+        var client = new VirNetRpcClient(stream);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
         stream.QueueStream(serial: 1, VirNetMessageStatus.Continue, [1, 2, 3, 4, 5]);
         stream.QueueStream(serial: 1, VirNetMessageStatus.Ok, []);
-        var client = new VirNetRpcClient(stream);
-        await using var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
 
         var chunk1 = new byte[2];
         var read1 = await rpcStream.ReadAsync(chunk1, TestContext.Current.CancellationToken);
@@ -153,11 +179,10 @@ public class VirNetRpcStreamTests
         // confirmed against go-libvirt's processIncomingStream comment):
         // end-of-stream can arrive as Continue+empty-payload, not just Ok.
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
+        var client = new VirNetRpcClient(stream);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
         stream.QueueStream(serial: 1, VirNetMessageStatus.Continue, [9]);
         stream.QueueStream(serial: 1, VirNetMessageStatus.Continue, []); // the quirk
-        var client = new VirNetRpcClient(stream);
-        await using var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
 
         var buffer = new byte[10];
         var first = await rpcStream.ReadAsync(buffer, TestContext.Current.CancellationToken);
@@ -172,10 +197,9 @@ public class VirNetRpcStreamTests
     public async Task ReadAsync_ErrorFrame_ThrowsLibvirtRpcExceptionWithDecodedError()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
-        stream.QueueStream(serial: 1, VirNetMessageStatus.Error, EncodeError(SampleError));
         var client = new VirNetRpcClient(stream);
-        await using var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
+        stream.QueueStream(serial: 1, VirNetMessageStatus.Error, EncodeError(SampleError));
 
         var buffer = new byte[10];
         var ex = await Assert.ThrowsAsync<LibvirtRpcException>(() => rpcStream.ReadAsync(buffer, TestContext.Current.CancellationToken).AsTask());
@@ -187,16 +211,15 @@ public class VirNetRpcStreamTests
     public async Task ReadAsync_UnsolicitedFrameForDifferentSerial_IsForwardedNotMisreadAsStreamData()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
-        stream.QueueMessage(procedure: 999, payload: [7, 7]); // unrelated event, different serial (0)
-        stream.QueueStream(serial: 1, VirNetMessageStatus.Continue, [1]);
-        stream.QueueStream(serial: 1, VirNetMessageStatus.Ok, []);
         var client = new VirNetRpcClient(stream);
 
         VirNetMessage? received = null;
         client.UnsolicitedMessageReceived += m => received = m;
 
-        await using var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
+        stream.QueueMessage(procedure: 999, payload: [7, 7]); // unrelated event, different serial (0), arriving while the stream itself is being read
+        stream.QueueStream(serial: 1, VirNetMessageStatus.Continue, [1]);
+        stream.QueueStream(serial: 1, VirNetMessageStatus.Ok, []);
         var buffer = new byte[10];
         var read = await rpcStream.ReadAsync(buffer, TestContext.Current.CancellationToken);
 
@@ -210,9 +233,8 @@ public class VirNetRpcStreamTests
     public async Task WriteAsync_SendsContinueFrameWithSameProgVersProcSerialAsTheOpeningCall()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
-        await using var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
 
         await rpcStream.WriteAsync(new byte[] { 1, 2, 3 }, TestContext.Current.CancellationToken);
 
@@ -231,9 +253,8 @@ public class VirNetRpcStreamTests
     public async Task WriteAsync_EmptyBuffer_SendsNoFrame()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
-        await using var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
 
         await rpcStream.WriteAsync(ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
 
@@ -244,9 +265,8 @@ public class VirNetRpcStreamTests
     public async Task CompleteWritingAsync_SendsOkFrameWithEmptyPayload_AndIsIdempotent()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
-        await using var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
 
         await rpcStream.CompleteWritingAsync(TestContext.Current.CancellationToken);
         await rpcStream.CompleteWritingAsync(TestContext.Current.CancellationToken); // must not send a second frame
@@ -262,9 +282,8 @@ public class VirNetRpcStreamTests
     public async Task AbortAsync_SendsErrorFrame_AndSuppressesDisposalsGracefulCompletion()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
-        var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
 
         await rpcStream.AbortAsync(TestContext.Current.CancellationToken);
         await rpcStream.DisposeAsync(); // must not also send a graceful Ok frame
@@ -278,9 +297,8 @@ public class VirNetRpcStreamTests
     public async Task WriteAsync_AfterCompleteWritingAsync_Throws()
     {
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
-        await using var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        await using var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
         await rpcStream.CompleteWritingAsync(TestContext.Current.CancellationToken);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => rpcStream.WriteAsync(new byte[] { 1 }, TestContext.Current.CancellationToken).AsTask());
@@ -291,9 +309,8 @@ public class VirNetRpcStreamTests
     {
         // Ordinary teardown isn't itself an error condition -- see VirNetRpcStream's class doc.
         var stream = new FakeDuplexStream();
-        stream.QueueReply(serial: 1, VirNetMessageStatus.Continue, payload: []);
         var client = new VirNetRpcClient(stream);
-        var rpcStream = await client.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        var rpcStream = await OpenStreamAsync(stream, client, TestContext.Current.CancellationToken);
 
         await rpcStream.DisposeAsync();
 

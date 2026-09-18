@@ -28,14 +28,30 @@ namespace NetfxLibvirt.Rpc;
 /// full push-based event subscription model, which stays out of scope
 /// until something beyond that validation slice actually needs it.
 ///
-/// A call whose reply carries <see cref="VirNetMessageStatus.Continue"/>
-/// (e.g. <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c>) opens a
-/// <see cref="VirNetRpcStream"/> instead of returning a plain payload — see
-/// <see cref="OpenStreamAsync"/>. Only one call or stream may be in flight
-/// at a time on a given connection (same "one call at a time" simplification
-/// as the rest of this class), so <see cref="OpenStreamAsync"/> and
-/// <see cref="CallAsync"/> both throw if a previously opened stream hasn't
-/// been disposed yet.
+/// Some procedures (e.g. <c>REMOTE_PROC_DOMAIN_OPEN_CONSOLE</c>,
+/// <c>_SCREENSHOT</c>, <c>_MIGRATE_PREPARE_TUNNEL</c>) open a
+/// <see cref="VirNetRpcStream"/> of subsequent <see cref="VirNetMessageType.Stream"/>
+/// frames on the same serial, in addition to their ordinary reply — see
+/// <see cref="OpenStreamAsync"/>. Contrary to an earlier version of this
+/// class, the *reply itself* is always an ordinary <see cref="VirNetMessageStatus.Ok"/>
+/// or <see cref="VirNetMessageStatus.Error"/>, never <c>Continue</c> —
+/// confirmed against libvirt's real client dispatcher
+/// (<c>virNetClientCallDispatchReply</c> vs. the structurally separate
+/// <c>virNetClientCallDispatchStream</c> in <c>src/rpc/virnetclient.c</c>):
+/// <c>Continue</c> is a status value that only ever appears on
+/// <see cref="VirNetMessageType.Stream"/>-typed frames, matching
+/// <c>virnetprotocol.x</c>'s own doc comment, which this class's own
+/// earlier version misread. <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c>
+/// specifically is *not* one of these — it's FD-passing (<c>SCM_RIGHTS</c>),
+/// confirmed against the real <c>remoteDomainOpenGraphics</c> in
+/// <c>remote_driver.c</c> and go-libvirt's own generated wrapper (neither
+/// wires a stream reader/writer for it) — see <c>docs/plan.md</c> story 15's
+/// follow-up for the full correction.
+///
+/// Only one call or stream may be in flight at a time on a given connection
+/// (same "one call at a time" simplification as the rest of this class), so
+/// <see cref="OpenStreamAsync"/> and <see cref="CallAsync"/> both throw if a
+/// previously opened stream hasn't been disposed yet.
 /// </summary>
 public sealed class VirNetRpcClient
 {
@@ -114,25 +130,27 @@ public sealed class VirNetRpcClient
             {
                 VirNetMessageStatus.Ok => frame.Payload,
                 VirNetMessageStatus.Error => throw DecodeError(frame.Payload),
-                VirNetMessageStatus.Continue => throw new NotSupportedException(
-                    $"a VIR_NET_CONTINUE reply means this call opened a stream — use {nameof(OpenStreamAsync)} instead of {nameof(CallAsync)} for stream-opening procedures like REMOTE_PROC_DOMAIN_OPEN_GRAPHICS."),
-                _ => throw new InvalidOperationException($"Unknown reply status {frame.Header.Status}."),
+                _ => throw new InvalidOperationException(
+                    $"Unexpected reply status {frame.Header.Status} — a {nameof(VirNetMessageStatus.Continue)} reply is not valid protocol (see the class doc); {nameof(VirNetMessageStatus.Continue)} only ever appears on {nameof(VirNetMessageType.Stream)}-typed frames."),
             };
         }
     }
 
     /// <summary>
-    /// Like <see cref="CallAsync"/>, but for a procedure whose successful
-    /// reply is a <see cref="VirNetMessageStatus.Continue"/> status rather
-    /// than an ordinary payload — libvirt's signal that the call opened a
-    /// <see cref="VirNetMessageType.Stream"/> instead of returning data
-    /// directly (e.g. <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c>, which tunnels
-    /// a domain's raw VNC/SPICE graphics bytes over this same RPC
-    /// connection). Returns the opened <see cref="VirNetRpcStream"/>; the
-    /// caller owns disposing it, which also releases this client for
-    /// further calls (see the class doc).
+    /// Like <see cref="CallAsync"/>, but for a procedure that opens a
+    /// <see cref="VirNetRpcStream"/> of <see cref="VirNetMessageType.Stream"/>
+    /// frames on this call's serial, in addition to its ordinary reply
+    /// (e.g. <c>REMOTE_PROC_DOMAIN_OPEN_CONSOLE</c>, <c>_SCREENSHOT</c>,
+    /// <c>_MIGRATE_PREPARE_TUNNEL</c> — see the class doc for why
+    /// <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c> is *not* one of these).
+    /// Returns both the reply's own payload (some of these procedures still
+    /// carry real data there — e.g. <c>DOMAIN_SCREENSHOT</c>'s MIME type —
+    /// decode it with the matching generated <c>*_ret</c> DTO, or discard it
+    /// if the procedure has none) and the opened stream; the caller owns
+    /// disposing the stream, which also releases this client for further
+    /// calls (see the class doc).
     /// </summary>
-    public async Task<VirNetRpcStream> OpenStreamAsync(int procedure, ReadOnlyMemory<byte> argsPayload, CancellationToken cancellationToken = default)
+    public async Task<VirNetRpcStreamResult> OpenStreamAsync(int procedure, ReadOnlyMemory<byte> argsPayload, CancellationToken cancellationToken = default)
     {
         if (_streamActive)
         {
@@ -168,14 +186,15 @@ public sealed class VirNetRpcClient
 
             switch (frame.Header.Status)
             {
-                case VirNetMessageStatus.Continue:
+                case VirNetMessageStatus.Ok:
                     _streamActive = true;
-                    return new VirNetRpcStream(this, _stream, callHeader.Prog, callHeader.Vers, procedure, serial);
+                    var stream = new VirNetRpcStream(this, _stream, callHeader.Prog, callHeader.Vers, procedure, serial);
+                    return new VirNetRpcStreamResult(frame.Payload, stream);
                 case VirNetMessageStatus.Error:
                     throw DecodeError(frame.Payload);
                 default:
                     throw new InvalidOperationException(
-                        $"Expected a {nameof(VirNetMessageStatus.Continue)} reply (this call should open a stream), but got {frame.Header.Status}.");
+                        $"Unexpected reply status {frame.Header.Status} for a stream-opening call.");
             }
         }
     }

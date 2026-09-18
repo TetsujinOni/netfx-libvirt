@@ -171,24 +171,6 @@ public class LibvirtConnectionOperationsTests
     }
 
     [Fact]
-    public async Task OpenGraphicsAsync_LooksUpDomainThenOpensStream()
-    {
-        var (stream, connection) = await OpenAsync();
-        await using var _ = connection;
-
-        QueueOk(stream, Encode(new RemoteDomainLookupByNameRet { Dom = SampleDomain("vm1", 1) }));
-        stream.QueueReply(_nextSerial++, VirNetMessageStatus.Continue, []); // OPEN_GRAPHICS: the reply itself signals a stream, not a payload
-
-        await using var graphicsStream = await connection.OpenGraphicsAsync("vm1", cancellationToken: TestContext.Current.CancellationToken);
-
-        var sent = stream.ReadAllSentFrames();
-        Assert.Equal((int)RemoteProcedure.RemoteProcDomainOpenGraphics, sent[3].Header.Proc);
-        var args = RemoteDomainOpenGraphicsArgs.Decode(new XdrReader(sent[3].Payload));
-        Assert.Equal("vm1", args.Dom.Name);
-        Assert.Equal(0u, args.Idx);
-    }
-
-    [Fact]
     public async Task DisconnectAsync_SendsConnectCloseAndIsIdempotent()
     {
         var (stream, connection) = await OpenAsync();

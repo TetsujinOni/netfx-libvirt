@@ -571,62 +571,91 @@ story 13's fix end-to-end against a real daemon, not just hermetically.
 The other 60+ event procedures stay deferred, picked up per-epic later
 (see the priority-order note above) rather than as a follow-on batch here.
 
-### 15. RPC streaming (`VIR_NET_CONTINUE`) + `DOMAIN_OPEN_GRAPHICS`.
+### 15. RPC streaming (`VIR_NET_CONTINUE`) + real remote graphics access.
 
-**Status: done, 2026-09-18 — hermetically; real-domain validation still
-open.** Requested by `avalonia-virt-manager`: its real SPICE/VNC console
-MVP works against lab fixtures deliberately configured with
-`listen='0.0.0.0'`, but fails against libvirt's actual common-case default,
-`listen='127.0.0.1'` (confirmed against a real domain, `Win2019-Dev-Oni` on
-`srv-l-vm01`) — the graphics server only binds the hypervisor's loopback
-interface, so a raw socket dial to the hypervisor's routable IP gets
-connection-refused. `virt-manager` itself reaches it by tunneling through
-libvirt's own RPC-level graphics-open mechanism instead of a raw socket;
-`virDomainOpenGraphics`'s *local* C API is FD-passing-only (useless
-remotely), but the RPC-level `REMOTE_PROC_DOMAIN_OPEN_GRAPHICS` procedure
-tunnels the graphics stream as real protocol data over the *existing* RPC
-connection specifically so this works remotely.
+**Status: done and validated against the real domain, 2026-09-18 — but not
+via the mechanism first attempted.** Requested by `avalonia-virt-manager`:
+its real SPICE/VNC console MVP fails against libvirt's actual common-case
+default, `listen='127.0.0.1'` (confirmed against a real domain,
+`Win2019-Dev-Oni` on `srv-l-vm01`) — the graphics server only binds the
+hypervisor's loopback interface, so a raw socket dial to the hypervisor's
+routable IP gets connection-refused.
 
-This was real new capability, not one more generated procedure:
-`VirNetRpcClient.CallAsync` already had an explicit placeholder throwing
-`NotSupportedException` on a `VIR_NET_CONTINUE` reply (story 13's own
-security-review note). Added `OpenStreamAsync` (send the call, but treat a
-`Continue` reply as "this call opened a stream" instead of an error) and
-`VirNetRpcStream` (a full-duplex `Stream` of subsequent `Type=Stream`
-frames on the same serial) plus `LibvirtConnection.OpenGraphicsAsync`.
+**First attempt (superseded, see below): `REMOTE_PROC_DOMAIN_OPEN_GRAPHICS`
+as a `VIR_NET_CONTINUE`-signaled RPC stream.** `VirNetRpcClient.CallAsync`
+already had an explicit placeholder throwing `NotSupportedException` on a
+`VIR_NET_CONTINUE` reply (story 13's own security-review note), which read
+as exactly the gap to fill. Built `OpenStreamAsync`/`VirNetRpcStream` and
+`LibvirtConnection.OpenGraphicsAsync` on that basis, backed by 19 hermetic
+tests. **Running this for real against `srv-l-vm01` immediately surfaced a
+genuine libvirt error: `"internal error: No FD available at slot 0"`.**
 
-Frame shape confirmed against `digitalocean/go-libvirt`'s own
-`Socket.SendStream`/`processIncomingStream` (`reference/go-libvirt-src/socket.go`)
-rather than guessed — go-libvirt's own generated `DomainOpenGraphics`
-wrapper turned out to *not* actually be a usable reference for the stream
-I/O itself (it calls `requestStream` with both `out`/`in` readers/writers
-`nil`, so it never wires the stream up at all — a real, if surprising,
-finding from actually reading the code rather than trusting the peer
-session's "go-libvirt implements this" at face value). The reusable
-*mechanism* (`requestStream`'s stream-frame loop, used by other real
-go-libvirt callers) was still the right reference: outbound chunks are
-`Type=Stream`/`Status=Continue`, finished by `Status=Ok` with an empty
-payload; inbound ends the same way, **or** — a real, documented libvirtd
-quirk go-libvirt's own comment calls out ("libvirtd breaks protocol and
-returns StatusContinue with an empty response Payload when the stream
-finishes") — a `Status=Continue` frame whose payload happens to be empty.
-Both are handled. Only one call or stream may be in flight on a connection
-at a time (same simplification `VirNetRpcClient` already had); `CallAsync`
-and `OpenStreamAsync` both throw if the other's already active.
+Root-caused by reading libvirt's actual C client
+(`remoteDomainOpenGraphics`/`remoteDomainOpenGraphicsFD` in
+`src/remote/remote_driver.c`, fetched fresh rather than assumed) and
+go-libvirt's real generated wrapper side by side:
+**`REMOTE_PROC_DOMAIN_OPEN_GRAPHICS`/`_FD` are both FD-passing
+(`SCM_RIGHTS` ancillary data on the socket itself), not
+`VIR_NET_CONTINUE`/stream-based at all** — `remoteDomainOpenGraphics` calls
+`callFull(..., fdin, fdinlen, NULL, NULL, ...)`, handing the server a
+*local* file descriptor via ancillary data; `remoteDomainOpenGraphicsFD`
+reads one back the same way. Neither can work over SSH/TCP — OS-level FD
+passing only exists over a real local `AF_UNIX` socket. go-libvirt's own
+generated `DomainOpenGraphics`/`DomainOpenGraphicsFd` wrappers confirm this
+independently: both call `requestStream(proc, ..., nil, nil)` — no
+reader/writer wired at all, unlike go-libvirt's *real* stream users
+(`DomainOpenConsoleBidirectional`, `DomainScreenshot`,
+`StorageVolUpload`/`Download`, `DomainMigratePrepareTunnel*`, all of which
+pass real `io.Reader`/`io.Writer`). The peer session's premise — "libvirt's
+own RPC-level graphics-open mechanism... this is how virt-manager itself
+reaches it" — didn't hold up against the primary source. There is no
+RPC-level remote graphics tunnel in libvirt; real `virt-viewer`/
+`virt-manager` reach a loopback-bound graphics server via their own
+independent SSH port forward, not any libvirt RPC call.
 
-19 new hermetic tests: frame-shape assertions (prog/vers/proc/serial carried
-correctly onto stream frames), multi-frame read concatenation, a
-caller-buffer-smaller-than-frame-payload case, the empty-payload quirk,
-mid-stream error decoding, unsolicited-frame forwarding during a stream
-read, the one-call-or-stream-at-a-time guard both directions, and
-`CompleteWritingAsync`/`AbortAsync`/plain-`DisposeAsync` (graceful-by-default
-— ordinary teardown isn't itself an error condition, so undisposed streams
-send `Status=Ok` not `Status=Error`) idempotency. Full suite: 270 total,
-0 failed, 6 skipped (Unix-socket integration tests, WSL-gated as before).
+**Separately, the frame-timing model was also wrong and has been fixed.**
+Per libvirt's real client dispatcher (`virNetClientCallDispatchReply` vs.
+the structurally separate `virNetClientCallDispatchStream` in
+`src/rpc/virnetclient.c`): `VIR_NET_CONTINUE` only ever appears on
+`VIR_NET_STREAM`-typed frames, **never on the reply itself** — matching
+`virnetprotocol.x`'s own doc comment, which this class's original version
+misread. `OpenStreamAsync` now treats the opening call's reply as an
+ordinary `Ok`/`Error` (returning both that reply's own payload — some real
+stream procedures like `DOMAIN_SCREENSHOT` carry real data there — and the
+opened `VirNetRpcStream`), then reads subsequent `Type=Stream` frames for
+the actual data. `VirNetRpcStream` itself (the stream-frame read/write
+loop: `Continue`-with-data, `Ok`-empty end, the documented
+`Continue`-with-empty-payload libvirtd quirk, `Error` mid-stream) was
+already correct and needed no changes — kept as real, reusable
+infrastructure for the procedures that genuinely use it
+(`DOMAIN_OPEN_CONSOLE`, `_SCREENSHOT`, `_MIGRATE_PREPARE_TUNNEL`, etc.),
+just not for graphics. `REMOTE_PROC_DOMAIN_OPEN_GRAPHICS` support
+(`LibvirtConnection.OpenGraphicsAsync`, `RemoteDomainOpenGraphicsArgs`) was
+removed — it's genuinely unusable remotely, and keeping a real-looking API
+that silently fails against every non-local connection would be worse than
+not having it.
 
-**Not yet validated against a real domain's graphics server** — the
-Testcontainers fixture has no qemu/kvm, so nothing in this repo's own CI
-path can produce real VNC/SPICE stream traffic to open. Validate against
-any real domain with `listen='127.0.0.1'` when one's reachable (per the
-requesting session, any domain qualifies — doesn't need to be
-`Win2019-Dev-Oni` specifically).
+**The real fix: `Transport/SshPortForward`, an independent SSH local port
+forward (`ssh -L`'s equivalent) via SSH.NET's `ForwardedPortLocal`**, bound
+to an ephemeral local port and pointed at `127.0.0.1:<graphics-port>` as
+resolved from the hypervisor's own network — exactly what real
+`virt-viewer` does. **Validated end-to-end against the real domain this
+story exists for**: connected to `srv-l-vm01`, fetched `Win2019-Dev-Oni`'s
+real XML (`<graphics type='vnc' port='5900' autoport='yes'
+listen='127.0.0.1'>`), opened the port forward, and read the real VNC
+server's actual protocol banner back through it — `RFB 003.008\n`,
+byte-exact, the real RFB version-handshake string, not a guess or
+placeholder. A hermetic-adjacent integration test
+(`SshPortForwardIntegrationTests`, against the Testcontainers fixture)
+proves the same mechanism generically by forwarding to the fixture
+container's own `sshd` and reading back a real `SSH-2.0-...` banner — real
+bytes genuinely crossing the tunnel, without needing qemu/kvm in the
+fixture image.
+
+Full suite: 271 total (270 + the new port-forward integration test), 0
+failed, 6 skipped (Unix-socket integration tests, WSL-gated as before). The
+generalizable lesson: a peer session's stated premise about how a
+third-party protocol works is exactly the kind of claim this project's own
+validation standard exists to catch before building on it — running
+against real infrastructure at the first opportunity (rather than only
+after a full implementation plus hermetic tests) surfaced this in minutes.

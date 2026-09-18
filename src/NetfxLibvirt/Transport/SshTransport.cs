@@ -86,7 +86,8 @@ public static class SshTransport
     private static bool VerifyServerHostKey(SshTransportOptions options, HostKeyEventArgs e) =>
         options.VerifyHostKey(new SshHostKeyInfo(e.HostKeyName, e.KeyLength, e.FingerPrintSHA256, e.HostKey));
 
-    private static AuthenticationMethod BuildAuthenticationMethod(SshTransportOptions options)
+    /// <summary>Shared with <see cref="SshPortForward"/> so both connect using the exact same auth logic.</summary>
+    internal static AuthenticationMethod BuildAuthenticationMethod(SshTransportOptions options)
     {
         if (options.PrivateKeyPath is not null)
         {

@@ -74,6 +74,11 @@ public sealed class SshPortForward : IAsyncDisposable
         {
             await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            client.Dispose();
+            throw;
+        }
         catch (Exception ex)
         {
             client.Dispose();

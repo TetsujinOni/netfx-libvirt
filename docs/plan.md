@@ -659,3 +659,21 @@ third-party protocol works is exactly the kind of claim this project's own
 validation standard exists to catch before building on it — running
 against real infrastructure at the first opportunity (rather than only
 after a full implementation plus hermetic tests) surfaced this in minutes.
+
+**Follow-up, same day: `SshPortForward.OpenAsync`/`SshTransport.ConnectAsync`
+were swallowing `OperationCanceledException`.** `avalonia-virt-manager`
+validated `SshPortForward.OpenAsync` for real (VNC console now renders
+through it against `Win2019-Dev-Oni`) and found a real bug wiring it in:
+both methods' `catch (Exception ex)` around `client.ConnectAsync(cancellationToken)`
+caught cancellation too, rewrapping it as a misleading
+`SshTransportException("...authentication...failed")` instead of letting
+`OperationCanceledException` surface — so a caller cancelling mid-connect
+(e.g. the user navigating away) saw a fake auth failure instead of an
+ordinary cancellation. Fixed in both with a
+`catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)`
+clause ahead of the generic one, rethrowing as-is. Two new hermetic
+regression tests (`SshCancellationTests`) prove it with an already-cancelled
+token and an unreachable (`TEST-NET-3`) host — no Docker/network needed,
+since SSH.NET's own `BaseClient.ConnectAsync` calls
+`cancellationToken.ThrowIfCancellationRequested()` before touching the
+network. Full suite: 273 total, 0 failed, 6 skipped.

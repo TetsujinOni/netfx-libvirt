@@ -1,6 +1,6 @@
 # netfx-libvirt — Status
 
-**Last updated:** 2026-09-16 (plan stories 1–11 done and validated against real infra — see `docs/plan.md`)
+**Last updated:** 2026-09-18 (RPC streaming / `DOMAIN_OPEN_GRAPHICS` landed — see "Completed" below; plan stories 1–11 done and validated against real infra — see `docs/plan.md`)
 
 ## What this is
 
@@ -172,6 +172,7 @@ Solution `netfx-libvirt.slnx` with four projects:
 | Domain operations | `LibvirtConnection.{ListDomainsAsync,StartDomainAsync,ShutdownDomainAsync,DestroyDomainAsync,GetDomainXmlAsync,DisconnectAsync}` — full parity with `virt-desktop`'s `hypervisorAPI`. |
 | SSH transport | `Transport/SshTransport` on `SSH.NET` — execs libvirt's own `virt-ssh-helper` over a plain SSH exec channel rather than replicating `virt-desktop`'s `direct-streamlocal` channel-open. Validated against a real, self-built container — see Validation below. |
 | Container-based real-infra tests | `Integration/{docker,LibvirtdContainerFixture}` — a small self-authored image (Ubuntu 22.04 + `libvirt-daemon-system` + `openssh-server`, no qemu/kvm, no `--privileged`) built and started via `Testcontainers` on every test run. Zero host configuration; works the same for any contributor and in CI. |
+| RPC streaming (`VIR_NET_CONTINUE`) | `Rpc/{VirNetRpcClient.OpenStreamAsync,VirNetRpcStream}` + `LibvirtConnection.OpenGraphicsAsync` — real new capability, not one more generated procedure: a call whose reply carries `VIR_NET_CONTINUE` instead of an ordinary payload opens a full-duplex `VirNetRpcStream` of subsequent `Type=Stream` frames, terminated by `Status=Ok` or a real documented libvirtd quirk (`Status=Continue` with an *empty* payload — confirmed against `go-libvirt`'s own `processIncomingStream` comment in `reference/go-libvirt-src/socket.go`, not guessed). `OpenGraphicsAsync` (`REMOTE_PROC_DOMAIN_OPEN_GRAPHICS`) is the first consumer — the real fix for a domain whose graphics server only listens on the hypervisor's loopback interface (`listen='127.0.0.1'`, libvirt's actual default), which a raw socket dial to the hypervisor's routable IP can't reach. Requested by `avalonia-virt-manager` (its real SPICE/VNC console MVP hit exactly this against a real domain, `Win2019-Dev-Oni` on `srv-l-vm01`) — see that repo's `docs/next-phase-design-review.md`. 19 new hermetic tests (frame-shape byte-literal assertions, multi-frame read concatenation, the empty-payload-quirk end-of-stream case, error decoding mid-stream, the one-call-or-stream-at-a-time guard). **Not yet validated against a real domain's graphics server** — the Testcontainers fixture has no qemu/kvm, so it can't produce a real VNC/SPICE stream to open; validate against any real domain with `listen='127.0.0.1'` when one's reachable (any domain qualifies, not specifically `Win2019-Dev-Oni`). |
 
 ## Validation so far
 

@@ -34,6 +34,7 @@ string[] procedureSet =
     "REMOTE_PROC_DOMAIN_SHUTDOWN",
     "REMOTE_PROC_DOMAIN_DESTROY",
     "REMOTE_PROC_AUTH_LIST",
+    "REMOTE_PROC_DOMAIN_OPEN_GRAPHICS",
 ];
 
 var module = XdlModuleBuilder.Build(XdlParser.Parse(File.ReadAllText(protocolPath)));

@@ -27,11 +27,21 @@ namespace NetfxLibvirt.Rpc;
 /// docs/plan.md's Events story validates the architecture with — not a
 /// full push-based event subscription model, which stays out of scope
 /// until something beyond that validation slice actually needs it.
+///
+/// A call whose reply carries <see cref="VirNetMessageStatus.Continue"/>
+/// (e.g. <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c>) opens a
+/// <see cref="VirNetRpcStream"/> instead of returning a plain payload — see
+/// <see cref="OpenStreamAsync"/>. Only one call or stream may be in flight
+/// at a time on a given connection (same "one call at a time" simplification
+/// as the rest of this class), so <see cref="OpenStreamAsync"/> and
+/// <see cref="CallAsync"/> both throw if a previously opened stream hasn't
+/// been disposed yet.
 /// </summary>
 public sealed class VirNetRpcClient
 {
     private readonly Stream _stream;
     private uint _nextSerial = 1;
+    private bool _streamActive;
 
     public VirNetRpcClient(Stream stream)
     {
@@ -64,6 +74,12 @@ public sealed class VirNetRpcClient
     /// </summary>
     public async Task<byte[]> CallAsync(int procedure, ReadOnlyMemory<byte> argsPayload, CancellationToken cancellationToken = default)
     {
+        if (_streamActive)
+        {
+            throw new InvalidOperationException(
+                $"A {nameof(VirNetRpcStream)} opened by {nameof(OpenStreamAsync)} is still open on this connection; dispose it before making another call.");
+        }
+
         var serial = _nextSerial++;
         var callHeader = new VirNetMessageHeader(
             Prog: (uint)RemoteProtocolConstants.RemoteProgram,
@@ -99,12 +115,77 @@ public sealed class VirNetRpcClient
                 VirNetMessageStatus.Ok => frame.Payload,
                 VirNetMessageStatus.Error => throw DecodeError(frame.Payload),
                 VirNetMessageStatus.Continue => throw new NotSupportedException(
-                    "a VIR_NET_CONTINUE reply means this call opened a stream — streaming isn't supported yet."),
+                    $"a VIR_NET_CONTINUE reply means this call opened a stream — use {nameof(OpenStreamAsync)} instead of {nameof(CallAsync)} for stream-opening procedures like REMOTE_PROC_DOMAIN_OPEN_GRAPHICS."),
                 _ => throw new InvalidOperationException($"Unknown reply status {frame.Header.Status}."),
             };
         }
     }
 
-    private static LibvirtRpcException DecodeError(byte[] payload) =>
+    /// <summary>
+    /// Like <see cref="CallAsync"/>, but for a procedure whose successful
+    /// reply is a <see cref="VirNetMessageStatus.Continue"/> status rather
+    /// than an ordinary payload — libvirt's signal that the call opened a
+    /// <see cref="VirNetMessageType.Stream"/> instead of returning data
+    /// directly (e.g. <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c>, which tunnels
+    /// a domain's raw VNC/SPICE graphics bytes over this same RPC
+    /// connection). Returns the opened <see cref="VirNetRpcStream"/>; the
+    /// caller owns disposing it, which also releases this client for
+    /// further calls (see the class doc).
+    /// </summary>
+    public async Task<VirNetRpcStream> OpenStreamAsync(int procedure, ReadOnlyMemory<byte> argsPayload, CancellationToken cancellationToken = default)
+    {
+        if (_streamActive)
+        {
+            throw new InvalidOperationException(
+                $"A {nameof(VirNetRpcStream)} opened by a previous {nameof(OpenStreamAsync)} call is still open on this connection; dispose it before opening another.");
+        }
+
+        var serial = _nextSerial++;
+        var callHeader = new VirNetMessageHeader(
+            Prog: (uint)RemoteProtocolConstants.RemoteProgram,
+            Vers: (uint)RemoteProtocolConstants.RemoteProtocolVersion,
+            Proc: procedure,
+            Type: VirNetMessageType.Call,
+            Serial: serial,
+            Status: VirNetMessageStatus.Ok);
+
+        await VirNetMessageFraming.WriteFrameAsync(_stream, callHeader, argsPayload, cancellationToken).ConfigureAwait(false);
+
+        while (true)
+        {
+            var frame = await VirNetMessageFraming.ReadFrameAsync(_stream, cancellationToken).ConfigureAwait(false);
+
+            if (frame.Header.Type is not (VirNetMessageType.Reply or VirNetMessageType.ReplyWithFds))
+            {
+                UnsolicitedMessageReceived?.Invoke(frame);
+                continue;
+            }
+
+            if (frame.Header.Serial != serial)
+            {
+                continue;
+            }
+
+            switch (frame.Header.Status)
+            {
+                case VirNetMessageStatus.Continue:
+                    _streamActive = true;
+                    return new VirNetRpcStream(this, _stream, callHeader.Prog, callHeader.Vers, procedure, serial);
+                case VirNetMessageStatus.Error:
+                    throw DecodeError(frame.Payload);
+                default:
+                    throw new InvalidOperationException(
+                        $"Expected a {nameof(VirNetMessageStatus.Continue)} reply (this call should open a stream), but got {frame.Header.Status}.");
+            }
+        }
+    }
+
+    /// <summary>Used by <see cref="VirNetRpcStream"/> to forward a frame that arrived for a different serial while it was reading — same demultiplexing this client's own <see cref="CallAsync"/> does.</summary>
+    internal void RaiseUnsolicitedMessage(VirNetMessage message) => UnsolicitedMessageReceived?.Invoke(message);
+
+    /// <summary>Called by <see cref="VirNetRpcStream.DisposeAsync"/> to release this client for further <see cref="CallAsync"/>/<see cref="OpenStreamAsync"/> calls.</summary>
+    internal void ReleaseStream() => _streamActive = false;
+
+    internal static LibvirtRpcException DecodeError(byte[] payload) =>
         new(RemoteError.Decode(new XdrReader(payload)));
 }

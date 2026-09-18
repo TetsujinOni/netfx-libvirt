@@ -28,6 +28,21 @@ internal sealed class FakeDuplexStream : Stream
         QueueFrame(header, payload);
     }
 
+    /// <summary>Queues a <see cref="VirNetMessageType.Stream"/> frame — the
+    /// shape a call that opened a stream (<see cref="VirNetMessageStatus.Continue"/>
+    /// reply) gets on subsequent reads, keyed to that same call's serial.</summary>
+    public void QueueStream(uint serial, VirNetMessageStatus status, byte[] payload)
+    {
+        var header = new VirNetMessageHeader(
+            Prog: (uint)RemoteProtocolConstants.RemoteProgram,
+            Vers: (uint)RemoteProtocolConstants.RemoteProtocolVersion,
+            Proc: 0,
+            Type: VirNetMessageType.Stream,
+            Serial: serial,
+            Status: status);
+        QueueFrame(header, payload);
+    }
+
     /// <summary>Queues an unsolicited <see cref="VirNetMessageType.Message"/>
     /// frame — real events arrive this way, unprompted and not tied to any
     /// call's serial (hence <c>serial: 0</c>, matching a real server's own

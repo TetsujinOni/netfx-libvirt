@@ -168,6 +168,42 @@ public sealed class LibvirtConnection : IAsyncDisposable
         return RemoteDomainGetXmlDescRet.Decode(new XdrReader(payload)).Xml;
     }
 
+    /// <summary>
+    /// Opens a tunnel to a domain's graphics server (VNC or SPICE, per its
+    /// <c>&lt;graphics&gt;</c> XML element) over this *existing* RPC
+    /// connection — the real fix for the common case where the graphics
+    /// server only listens on the hypervisor's loopback interface
+    /// (<c>&lt;graphics ... listen='127.0.0.1'&gt;</c>, libvirt's actual
+    /// default): dialing the hypervisor's routable IP at that port directly
+    /// gets connection-refused, because nothing outside the hypervisor can
+    /// reach it that way. <c>REMOTE_PROC_DOMAIN_OPEN_GRAPHICS</c> exists
+    /// specifically so a remote client doesn't need a second connection (an
+    /// SSH port-forward, etc.) — it tunnels the graphics protocol's raw
+    /// bytes as ordinary stream data on this same connection instead, which
+    /// is how <c>virt-manager</c> itself reaches a loopback-bound graphics
+    /// server remotely.
+    ///
+    /// <paramref name="index"/> is the graphics device's index within the
+    /// domain (<c>0</c> for the common single-graphics-device case — matches
+    /// <c>go-libvirt</c>'s own <c>DomainOpenGraphics(Dom, Idx, Flags)</c>
+    /// signature). The returned <see cref="Stream"/> carries the raw
+    /// VNC/SPICE protocol bytes in both directions — read/write it exactly
+    /// as you would a direct socket to the graphics server; see
+    /// <see cref="VirNetRpcStream"/>'s own doc for the framing this tunnels
+    /// over. While this stream is open, no other call can be made on this
+    /// <see cref="LibvirtConnection"/> (see <see cref="VirNetRpcClient"/>'s
+    /// doc) — dispose it before, e.g., calling <see cref="GetDomainXmlAsync"/>
+    /// again.
+    /// </summary>
+    public async Task<VirNetRpcStream> OpenGraphicsAsync(string name, uint index = 0, CancellationToken cancellationToken = default)
+    {
+        var domain = await LookupDomainByNameAsync(name, cancellationToken).ConfigureAwait(false);
+        var args = new RemoteDomainOpenGraphicsArgs { Dom = domain, Idx = index, Flags = 0 };
+        var writer = new XdrWriter();
+        args.Encode(writer);
+        return await _rpc.OpenStreamAsync((int)RemoteProcedure.RemoteProcDomainOpenGraphics, writer.ToArray(), cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Gracefully ends the RPC session (<c>CONNECT_CLOSE</c>) and
     /// closes the transport stream — mirrors <c>hypervisor.go</c>'s
     /// <c>Disconnect</c>. Idempotent. Unlike <see cref="DisposeAsync"/>,

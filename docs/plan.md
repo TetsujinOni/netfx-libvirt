@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-17 (stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
+**Last updated:** 2026-09-18 (story 15, RPC streaming / `DOMAIN_OPEN_GRAPHICS`, done hermetically — see below. Stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -570,3 +570,63 @@ proven, stories 6–10) and confirm the lifecycle event actually arrives via
 story 13's fix end-to-end against a real daemon, not just hermetically.
 The other 60+ event procedures stay deferred, picked up per-epic later
 (see the priority-order note above) rather than as a follow-on batch here.
+
+### 15. RPC streaming (`VIR_NET_CONTINUE`) + `DOMAIN_OPEN_GRAPHICS`.
+
+**Status: done, 2026-09-18 — hermetically; real-domain validation still
+open.** Requested by `avalonia-virt-manager`: its real SPICE/VNC console
+MVP works against lab fixtures deliberately configured with
+`listen='0.0.0.0'`, but fails against libvirt's actual common-case default,
+`listen='127.0.0.1'` (confirmed against a real domain, `Win2019-Dev-Oni` on
+`srv-l-vm01`) — the graphics server only binds the hypervisor's loopback
+interface, so a raw socket dial to the hypervisor's routable IP gets
+connection-refused. `virt-manager` itself reaches it by tunneling through
+libvirt's own RPC-level graphics-open mechanism instead of a raw socket;
+`virDomainOpenGraphics`'s *local* C API is FD-passing-only (useless
+remotely), but the RPC-level `REMOTE_PROC_DOMAIN_OPEN_GRAPHICS` procedure
+tunnels the graphics stream as real protocol data over the *existing* RPC
+connection specifically so this works remotely.
+
+This was real new capability, not one more generated procedure:
+`VirNetRpcClient.CallAsync` already had an explicit placeholder throwing
+`NotSupportedException` on a `VIR_NET_CONTINUE` reply (story 13's own
+security-review note). Added `OpenStreamAsync` (send the call, but treat a
+`Continue` reply as "this call opened a stream" instead of an error) and
+`VirNetRpcStream` (a full-duplex `Stream` of subsequent `Type=Stream`
+frames on the same serial) plus `LibvirtConnection.OpenGraphicsAsync`.
+
+Frame shape confirmed against `digitalocean/go-libvirt`'s own
+`Socket.SendStream`/`processIncomingStream` (`reference/go-libvirt-src/socket.go`)
+rather than guessed — go-libvirt's own generated `DomainOpenGraphics`
+wrapper turned out to *not* actually be a usable reference for the stream
+I/O itself (it calls `requestStream` with both `out`/`in` readers/writers
+`nil`, so it never wires the stream up at all — a real, if surprising,
+finding from actually reading the code rather than trusting the peer
+session's "go-libvirt implements this" at face value). The reusable
+*mechanism* (`requestStream`'s stream-frame loop, used by other real
+go-libvirt callers) was still the right reference: outbound chunks are
+`Type=Stream`/`Status=Continue`, finished by `Status=Ok` with an empty
+payload; inbound ends the same way, **or** — a real, documented libvirtd
+quirk go-libvirt's own comment calls out ("libvirtd breaks protocol and
+returns StatusContinue with an empty response Payload when the stream
+finishes") — a `Status=Continue` frame whose payload happens to be empty.
+Both are handled. Only one call or stream may be in flight on a connection
+at a time (same simplification `VirNetRpcClient` already had); `CallAsync`
+and `OpenStreamAsync` both throw if the other's already active.
+
+19 new hermetic tests: frame-shape assertions (prog/vers/proc/serial carried
+correctly onto stream frames), multi-frame read concatenation, a
+caller-buffer-smaller-than-frame-payload case, the empty-payload quirk,
+mid-stream error decoding, unsolicited-frame forwarding during a stream
+read, the one-call-or-stream-at-a-time guard both directions, and
+`CompleteWritingAsync`/`AbortAsync`/plain-`DisposeAsync` (graceful-by-default
+— ordinary teardown isn't itself an error condition, so undisposed streams
+send `Status=Ok` not `Status=Error`) idempotency. Full suite: 270 total,
+0 failed, 6 skipped (Unix-socket integration tests, WSL-gated as before).
+
+**Not yet validated against a real domain's graphics server** — the
+Testcontainers fixture has no qemu/kvm, so nothing in this repo's own CI
+path can produce real VNC/SPICE stream traffic to open. Validate against
+any real domain with `listen='127.0.0.1'` when one's reachable (per the
+requesting session, any domain qualifies — doesn't need to be
+`Win2019-Dev-Oni` specifically).

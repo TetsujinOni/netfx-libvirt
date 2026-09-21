@@ -5,7 +5,7 @@ namespace NetfxLibvirt.Transport;
 /// distinct from a <c>NetfxLibvirt.Rpc.LibvirtRpcException</c>, which means
 /// the SSH tunnel worked and the libvirt RPC underneath it is what
 /// failed.</summary>
-public sealed class SshTransportException : Exception
+public class SshTransportException : Exception
 {
     public SshTransportException(string message) : base(message)
     {

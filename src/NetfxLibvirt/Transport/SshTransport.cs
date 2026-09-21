@@ -1,5 +1,4 @@
 using Renci.SshNet;
-using Renci.SshNet.Common;
 
 namespace NetfxLibvirt.Transport;
 
@@ -61,26 +60,12 @@ namespace NetfxLibvirt.Transport;
 /// </summary>
 public static class SshTransport
 {
+    /// <exception cref="ArgumentException">Neither or both of <see cref="SshTransportOptions.VerifyHostKey"/> / <see cref="SshTransportOptions.VerifyHostKeyAsync"/> are set.</exception>
+    /// <exception cref="SshHostKeyRejectedException">The host key verifier rejected the server's key.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled (including while a host key verifier was pending) — never re-wrapped as an authentication failure.</exception>
     public static async Task<Stream> ConnectAsync(SshTransportOptions options, CancellationToken cancellationToken = default)
     {
-        var connectionInfo = new ConnectionInfo(options.Host, options.Port, options.Username, BuildAuthenticationMethod(options));
-        var client = new SshClient(connectionInfo);
-        client.HostKeyReceived += (_, e) => e.CanTrust = VerifyServerHostKey(options, e);
-
-        try
-        {
-            await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            client.Dispose();
-            throw;
-        }
-        catch (Exception ex)
-        {
-            client.Dispose();
-            throw new SshTransportException($"SSH authentication to {options.Host}:{options.Port} as '{options.Username}' failed.", ex);
-        }
+        var client = await ConnectClientAsync(options, cancellationToken).ConfigureAwait(false);
 
         var command = client.CreateCommand($"virt-ssh-helper {options.RemoteUri}");
         _ = command.ExecuteAsync(cancellationToken);
@@ -88,8 +73,39 @@ public static class SshTransport
         return new SshCommandDuplexStream(client, command);
     }
 
-    private static bool VerifyServerHostKey(SshTransportOptions options, HostKeyEventArgs e) =>
-        options.VerifyHostKey(new SshHostKeyInfo(e.HostKeyName, e.KeyLength, e.FingerPrintSHA256, e.HostKey));
+    /// <summary>The connect-and-verify path shared with <see cref="SshPortForward"/>:
+    /// validates the options, connects, runs the host key verifier (see
+    /// <see cref="SshHostKeyVerification"/>), and maps any failure to the
+    /// exception the caller should see.</summary>
+    internal static async Task<SshClient> ConnectClientAsync(SshTransportOptions options, CancellationToken cancellationToken)
+    {
+        var verification = new SshHostKeyVerification(options, cancellationToken);
+
+        var connectionInfo = new ConnectionInfo(options.Host, options.Port, options.Username, BuildAuthenticationMethod(options));
+        if (options.ConnectTimeout is { } timeout)
+        {
+            connectionInfo.Timeout = timeout;
+        }
+
+        var client = new SshClient(connectionInfo);
+        verification.Attach(client);
+
+        try
+        {
+            // Off the caller's context: nothing SSH.NET does synchronously
+            // during connect (including invoking the host key event) may
+            // run on, and so block, a UI thread the verifier might need.
+            await Task.Run(() => client.ConnectAsync(cancellationToken), CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            client.Dispose();
+            throw verification.MapConnectFailure(
+                ex, options.Host, options.Port, $"SSH authentication to {options.Host}:{options.Port} as '{options.Username}' failed.");
+        }
+
+        return client;
+    }
 
     /// <summary>Shared with <see cref="SshPortForward"/> so both connect using the exact same auth logic.</summary>
     internal static AuthenticationMethod BuildAuthenticationMethod(SshTransportOptions options)

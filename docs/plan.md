@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-18 (story 15, RPC streaming / `DOMAIN_OPEN_GRAPHICS`, done hermetically — see below. Stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
+**Last updated:** 2026-09-21 (story 16, async SSH host key verification, done — see below; story 15, RPC streaming / `DOMAIN_OPEN_GRAPHICS`, done hermetically — see below. Stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -677,3 +677,61 @@ token and an unreachable (`TEST-NET-3`) host — no Docker/network needed,
 since SSH.NET's own `BaseClient.ConnectAsync` calls
 `cancellationToken.ThrowIfCancellationRequested()` before touching the
 network. Full suite: 273 total, 0 failed, 6 skipped.
+
+### 16. Async SSH host key verification.
+
+**Status: done, 2026-09-21.** Requested by `avalonia-virt-manager`, which is
+replacing `DangerousAcceptAny` with persisted trust-on-first-use pinning: with
+only the synchronous `SshHostKeyVerifier` delegate, the first connection to a
+host has to be a blind auto-pin — TOFU's weakest point — because a consumer
+can't ask the user "Trust this host? SHA256:..." *during* the handshake.
+
+- **`AsyncSshHostKeyVerifier`** (`ValueTask<bool>(SshHostKeyInfo, CancellationToken)`)
+  supplied via `SshTransportOptions.VerifyHostKeyAsync`, honored by both
+  `SshTransport.ConnectAsync` and `SshPortForward.OpenAsync` (which now share
+  one connect-and-verify path, `SshTransport.ConnectClientAsync`, instead of
+  two copy-adjacent ones — the duplication that already caused the
+  cancellation bug in 77048a0).
+- **Exactly one of `VerifyHostKey` / `VerifyHostKeyAsync` must be set.**
+  C# can't express that at compile time without breaking existing callers
+  (a single `required` property can't be "one of two"), so it's checked at the
+  first possible moment — the start of the connect call, before any network
+  I/O — and throws `ArgumentException` for neither *or* both. "Never silently
+  accept an unverified host key" still holds; the sync verifier is unchanged.
+- **Bridging SSH.NET's synchronous `HostKeyReceived` event without
+  deadlocking.** The handler blocks on the async verifier, but the verifier is
+  started with `Task.Run` (thread pool, no `SynchronizationContext`) so nothing
+  it awaits can ever need the blocked thread, and the connect itself is also
+  run off the caller's context. The wait is cancellable
+  (`Task.WaitAny(task, ct)`), so cancelling the connect returns promptly even
+  from a verifier that ignores its token (documented: honor it, or your
+  prompt is left orphaned on screen). Mutation-checked: replacing `Task.Run`
+  with a direct call makes the deadlock regression test hang and fail.
+- **A rejected key is `SshHostKeyRejectedException`** (carries the exact
+  `SshHostKeyInfo`, host, port; derives from `SshTransportException`, which
+  is therefore no longer `sealed`) — for the sync verifier too, so consumers
+  no longer sniff a generic failure. A verifier cancelled by the *connect's*
+  token surfaces as `OperationCanceledException` (consistent with 77048a0);
+  a throwing verifier (including one cancelled by some *other* token)
+  rejects the key and surfaces as `SshTransportException` wrapping the fault.
+- **Real finding while verifying the timeout story: SSH.NET bounds the whole
+  handshake — including time spent in the host key event — with
+  `ConnectionInfo.Timeout` (30 s default).** A person taking a minute to
+  answer a trust dialog would have the connect time out underneath the
+  prompt. Added `SshTransportOptions.ConnectTimeout` (applied to
+  `ConnectionInfo.Timeout`) and documented it on the delegate and both
+  properties; an integration test proves a 3 s verifier fails under a 1 s
+  timeout and succeeds under 60 s. (The server has its own limit too:
+  OpenSSH `LoginGraceTime`, 120 s.)
+
+Tests (20 new; suite now 293 total, 0 failed, 6 skipped): hermetic
+(`SshHostKeyVerificationTests`) — validation for neither/both, validation
+happens before any network I/O, sync back-compat, async accept, async reject
+→ `SshHostKeyRejectedException`, verifier receives the key and the connect's
+token, cancellation during the prompt (including a token-ignoring verifier
+and a late-faulting one), throwing verifier, foreign-token cancellation, and
+the deadlock regression against a blocked `SynchronizationContext` (asserting
+the verifier also *ran* with no context); end-to-end over a real SSH handshake
+against the Testcontainers `sshd` (`SshHostKeyVerifierIntegrationTests`) —
+async accept for both transports, reject for both, sync reject, cancel while
+prompting, and the timeout bound.

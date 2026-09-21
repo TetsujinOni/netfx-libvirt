@@ -63,27 +63,13 @@ public sealed class SshPortForward : IAsyncDisposable
     /// resolved from the SSH server's own network (e.g. <c>127.0.0.1</c> to
     /// reach a loopback-bound service on the hypervisor itself).
     /// </summary>
+    /// <exception cref="ArgumentException">Neither or both of <see cref="SshTransportOptions.VerifyHostKey"/> / <see cref="SshTransportOptions.VerifyHostKeyAsync"/> are set.</exception>
+    /// <exception cref="SshHostKeyRejectedException">The host key verifier rejected the server's key.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled (including while a host key verifier was pending) — never re-wrapped as an authentication failure.</exception>
     public static async Task<SshPortForward> OpenAsync(
         SshTransportOptions sshOptions, string remoteHost, int remotePort, CancellationToken cancellationToken = default)
     {
-        var connectionInfo = new ConnectionInfo(sshOptions.Host, sshOptions.Port, sshOptions.Username, SshTransport.BuildAuthenticationMethod(sshOptions));
-        var client = new SshClient(connectionInfo);
-        client.HostKeyReceived += (_, e) => e.CanTrust = sshOptions.VerifyHostKey(new SshHostKeyInfo(e.HostKeyName, e.KeyLength, e.FingerPrintSHA256, e.HostKey));
-
-        try
-        {
-            await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            client.Dispose();
-            throw;
-        }
-        catch (Exception ex)
-        {
-            client.Dispose();
-            throw new SshTransportException($"SSH authentication to {sshOptions.Host}:{sshOptions.Port} as '{sshOptions.Username}' failed.", ex);
-        }
+        var client = await SshTransport.ConnectClientAsync(sshOptions, cancellationToken).ConfigureAwait(false);
 
         var port = new ForwardedPortLocal("127.0.0.1", 0, remoteHost, (uint)remotePort);
         client.AddForwardedPort(port);

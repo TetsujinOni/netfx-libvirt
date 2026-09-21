@@ -181,9 +181,8 @@ Solution `netfx-libvirt.slnx` with four projects:
 
 ## OpenSSH host verification (for consumers — `avalonia-virt-manager`)
 
-**Commit:** see the "Record commit hash" commit right after the implementation commit on
-branch `claude/elastic-chebyshev-c3d1a7` (a commit can't contain its own hash; the hash of the
-implementation commit is recorded here by that follow-up).
+**Implementation commit: `a84c27d`** on branch `claude/elastic-chebyshev-c3d1a7` (not pushed; the docs-only
+follow-up that records this hash comes right after it).
 **Design + findings:** `docs/plan.md` story 17. **Upstream drafts (undecided, not filed):** `docs/upstream/`.
 
 A consumer supplies only a prompt and (optionally) a file path. Wire it in with:

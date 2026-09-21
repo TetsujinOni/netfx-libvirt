@@ -12,3 +12,8 @@ Dockerfile text eol=lf
 # Windows checkout can't subtly corrupt the PEM encoding.
 id_ecdsa binary
 id_ecdsa.pub binary
+
+# Real ssh-keygen artifacts and the script that makes them: byte-exact, never line-ending converted
+# (a CRLF'd generate.sh fails under bash; key/cert/known_hosts files should stay as ssh-keygen wrote them).
+tests/NetfxLibvirt.Tests/Fixtures/OpenSsh/** -text
+tests/NetfxLibvirt.Tests/Fixtures/OpenSsh/generate.sh text eol=lf

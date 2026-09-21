@@ -27,6 +27,26 @@ public sealed class LibvirtdContainerFixture : IAsyncLifetime
 
     private IContainer? _container;
 
+    /// <summary>Container ports published for the extra <c>sshd</c> instances the host-certificate tests start inside the shared container (one per scenario, each with its own host certificate).</summary>
+    public const int ExtraSshdFirstPort = 2201;
+
+    public const int ExtraSshdPortCount = 60;
+
+    private int _lastExtraPort = ExtraSshdFirstPort - 1;
+
+    /// <summary>The next unused extra sshd port (container-side).</summary>
+    public int AllocateExtraSshdPort()
+    {
+        var port = Interlocked.Increment(ref _lastExtraPort);
+        return port < ExtraSshdFirstPort + ExtraSshdPortCount
+            ? port
+            : throw new InvalidOperationException("Out of extra sshd ports; raise ExtraSshdPortCount.");
+    }
+
+    public IContainer Container => _container!;
+
+    public ushort MappedPort(int containerPort) => _container!.GetMappedPublicPort(containerPort);
+
     public string? StartupFailure { get; private set; }
 
     public string Host => _container!.Hostname;
@@ -53,7 +73,7 @@ public sealed class LibvirtdContainerFixture : IAsyncLifetime
     {
         try
         {
-            _container = await LibvirtdFixtureImageAcquisition.StartAsync(DockerDirectory, SshPort).ConfigureAwait(false);
+            _container = await LibvirtdFixtureImageAcquisition.StartAsync(DockerDirectory, SshPort, Enumerable.Range(ExtraSshdFirstPort, ExtraSshdPortCount)).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

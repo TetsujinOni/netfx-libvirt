@@ -34,6 +34,9 @@
          included by the SDK's default globs as plain <None> items; this
          just adds the copy-to-output metadata. -->
     <None Update="Integration\docker\**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Real ssh-keygen-generated OpenSSH artifacts (see Fixtures/OpenSsh/generate.sh),
+         read from disk next to the test DLL, never located by tree-walking. -->
+    <None Update="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

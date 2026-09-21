@@ -1,6 +1,6 @@
 # netfx-libvirt — Status
 
-**Last updated:** 2026-09-21 (async SSH host key verification landed — see "Completed" below; RPC streaming landed, and real remote graphics access via SSH port-forward — validated against a real domain's real VNC server, see "Completed" below; plan stories 1–11 done and validated against real infra — see `docs/plan.md`)
+**Last updated:** 2026-09-21 (OpenSSH-standard host verification — `known_hosts`, `@cert-authority` host certificates, `@revoked` — landed, see "OpenSSH host verification" below and plan story 17; async SSH host key verification landed — see "Completed" below; RPC streaming landed, and real remote graphics access via SSH port-forward — validated against a real domain's real VNC server, see "Completed" below; plan stories 1–11 done and validated against real infra — see `docs/plan.md`)
 
 ## What this is
 
@@ -66,8 +66,10 @@ Solution `netfx-libvirt.slnx` with four projects:
     `remote_protocol.x` (same situation as `VIR_UUID_BUFLEN`, see
     `XdlConstantTable`'s doc), values cross-checked against go-libvirt's
     `const.gen.go`.
-- [`tests/NetfxLibvirt.Tests`](../tests/NetfxLibvirt.Tests) — xUnit v3, 125
-  tests. 119 run with **no special setup beyond Docker being available**:
+- [`tests/NetfxLibvirt.Tests`](../tests/NetfxLibvirt.Tests) — xUnit v3.
+  **Current total (after story 17): 371 tests, 0 failed, 7 skipped** (the 6
+  manually-gated `LibvirtdIntegrationTests` below + the env-gated lab-host
+  test); the paragraph below is the older breakdown (125 tests at the time). 119 run with **no special setup beyond Docker being available**:
   115 fully hermetic (every XDR primitive by byte-literal assertion *and*
   round-trip, the real `REMOTE_PROC_AUTH_LIST` call header byte-for-byte,
   message framing, the RPC call engine and every `LibvirtConnection`
@@ -175,6 +177,106 @@ Solution `netfx-libvirt.slnx` with four projects:
 | RPC streaming (`VIR_NET_CONTINUE`) | `Rpc/{VirNetRpcClient.OpenStreamAsync,VirNetRpcStream}` — real, reusable infrastructure for procedures that genuinely open a `VIR_NET_STREAM` alongside their ordinary reply (`DOMAIN_OPEN_CONSOLE`, `_SCREENSHOT`, `_MIGRATE_PREPARE_TUNNEL`, etc. — confirmed against libvirt's real `virnetclient.c` dispatcher and go-libvirt's own real stream users, not guessed). The opening call's reply is an ordinary `Ok`/`Error` (an earlier version wrongly assumed the reply itself carried `Continue` — fixed); `VirNetRpcStream` then handles subsequent `Type=Stream` frames, terminated by `Status=Ok` or a real documented libvirtd quirk (`Status=Continue` with an *empty* payload). 18 hermetic tests. |
 | Real remote graphics access | `Transport/SshPortForward` — an independent SSH local port forward (SSH.NET's `ForwardedPortLocal`), the actual fix for a domain whose graphics server only listens on the hypervisor's loopback interface (`listen='127.0.0.1'`, libvirt's actual default), which a raw socket dial to the hypervisor's routable IP can't reach. Requested by `avalonia-virt-manager` against a real domain, `Win2019-Dev-Oni` on `srv-l-vm01`. **`REMOTE_PROC_DOMAIN_OPEN_GRAPHICS` was tried first and found genuinely unusable remotely** — it's FD-passing (`SCM_RIGHTS`), confirmed against libvirt's real C client and go-libvirt's own generated wrapper, and removed once real-host validation hit an actual libvirt error (`"internal error: No FD available at slot 0"`) rather than working. **Validated end-to-end against the real domain**: a real VNC server banner (`RFB 003.008\n`) received through the forwarded port from `Win2019-Dev-Oni`'s actual graphics server. See `docs/plan.md` story 15 for the full correction trail. |
 | Async SSH host key verification | `Transport/{AsyncSshHostKeyVerifier,SshHostKeyVerification,SshHostKeyRejectedException}` + `SshTransportOptions.{VerifyHostKeyAsync,ConnectTimeout}` — lets a consumer ask the user "trust this host?" *during* the handshake (real trust-on-first-use instead of blind auto-pin). Exactly one of `VerifyHostKey`/`VerifyHostKeyAsync` must be set (checked before any network I/O); the async verifier runs on the thread pool so it cannot deadlock against a caller's `SynchronizationContext`; cancelling the connect dismisses a pending prompt and surfaces `OperationCanceledException`; a rejected key is a distinct `SshHostKeyRejectedException` carrying the offered `SshHostKeyInfo`. SSH.NET bounds the handshake (including the prompt) with a 30 s timeout, hence `ConnectTimeout`. 20 tests, hermetic plus end-to-end over a real SSH handshake. See `docs/plan.md` story 16. |
+| OpenSSH host verification | `Transport/OpenSsh/*` + `SshHostKeyRejectedException.Reason` — OpenSSH `known_hosts` (hashed names, wildcards, `[host]:port`, `@cert-authority`, `@revoked`) and host-certificate policy on top of SSH.NET's own certificate cryptography; prompts for new keys / new CAs; real-`ssh-keygen` fixtures, real-`sshd` handshakes, OpenSSH-as-oracle tests, mutation-checked. See the section below and `plan.md` story 17. |
+
+## OpenSSH host verification (for consumers — `avalonia-virt-manager`)
+
+**Commit:** see the "Record commit hash" commit right after the implementation commit on
+branch `claude/elastic-chebyshev-c3d1a7` (a commit can't contain its own hash; the hash of the
+implementation commit is recorded here by that follow-up).
+**Design + findings:** `docs/plan.md` story 17. **Upstream drafts (undecided, not filed):** `docs/upstream/`.
+
+A consumer supplies only a prompt and (optionally) a file path. Wire it in with:
+
+```csharp
+using NetfxLibvirt.Transport;
+using NetfxLibvirt.Transport.OpenSsh;
+
+var verifier = new OpenSshHostKeyVerifierOptions
+{
+    Host = host,                    // MUST equal SshTransportOptions.Host — separate record; only host-name/address characters accepted
+    Port = port,                    // MUST equal SshTransportOptions.Port
+    Prompt = myPrompt,              // IOpenSshHostKeyPrompt; null => anything not already trusted is rejected (UnknownAndNoPrompt)
+    // everything below is optional:
+    UserKnownHostsFile = null,      // default %USERPROFILE%\.ssh\known_hosts  (= ssh_config UserKnownHostsFile)
+    GlobalKnownHostsFiles = null,   // default [%ProgramData%\ssh\ssh_known_hosts]; read-only; [] for none
+    RequireCertificateWhenCaCovers = true,
+    AllowSha1CaSignatures = false,
+    TimeProvider = null,            // default TimeProvider.System
+    Hashing = KnownHostsHashing.MatchFile, // hash new entries iff the file already has hashed entries
+};
+
+// Preflight (cheap; reads the same files): raise ConnectTimeout only when a person may be asked.
+TrustState state = OpenSshHostKeyVerifier.GetTrustState(verifier);  // Unknown | Known | CaCovered
+//   Unknown  => will prompt.   CaCovered => never prompts.
+//   Known    => a plain key is on record; still prompts if the server offers a key TYPE with no entry (OpenSSH semantics).
+
+var options = new SshTransportOptions
+{
+    Host = host, Port = port, Username = user, RemoteUri = uri, /* auth... */
+    ConnectTimeout = state == TrustState.CaCovered ? null : TimeSpan.FromMinutes(5),
+    VerifyHostKeyAsync = OpenSshHostKeyVerifier.Create(verifier),
+};
+```
+
+**Public surface** (all in `NetfxLibvirt.Transport.OpenSsh` unless noted):
+
+```csharp
+public static class OpenSshHostKeyVerifier {
+    public static AsyncSshHostKeyVerifier Create(OpenSshHostKeyVerifierOptions options);
+    public static TrustState GetTrustState(OpenSshHostKeyVerifierOptions options);
+    public static TrustState GetTrustState(string host, int port = 22);   // default file paths
+}
+public interface IOpenSshHostKeyPrompt {
+    ValueTask<bool> ConfirmNewHostKeyAsync(NewHostKeyContext context, CancellationToken cancellationToken);
+    ValueTask<bool> ConfirmNewCertificateAuthorityAsync(NewCertificateAuthorityContext context, CancellationToken cancellationToken);
+}
+public record OpenSshPromptContext(string Host, int Port, string KeyType, string Fingerprint);   // Fingerprint = "SHA256:..." as `ssh-keygen -l`
+public sealed record NewHostKeyContext(...) : OpenSshPromptContext;
+public sealed record NewCertificateAuthorityContext(string Host, int Port, string KeyType /*CA's*/, string Fingerprint /*CA's*/,
+    string CertificateKeyId, ulong CertificateSerial, IReadOnlyList<string> CertificatePrincipals,
+    DateTimeOffset? ValidAfter, DateTimeOffset? ValidBefore /*null = unbounded*/) : OpenSshPromptContext;
+public enum TrustState { Unknown, Known, CaCovered }
+public enum KnownHostsHashing { MatchFile, Never, Always }
+
+// Also public: OpenSshKnownHosts (Load/Parse/FindEntries/FindCertificateAuthorities/CheckKey/Append/FormatLine/
+// DefaultUserFilePath/DefaultGlobalFilePaths), OpenSshKnownHostsEntry, KnownHostsMarker, KnownHostKeyCheck/Outcome,
+// OpenSshPublicKey, OpenSshPattern, SshHostCertificate.
+
+// NetfxLibvirt.Transport:
+public sealed class SshHostKeyRejectedException : SshTransportException {
+    public SshHostKeyRejectionReason Reason { get; }
+    public SshHostKeyInfo HostKey { get; }  public string Host { get; }  public int Port { get; }
+    public string? Detail { get; }
+    public SshCertificateProblem? CertificateProblem { get; init; }      // when Reason == CertificateInvalid
+    public string? KnownHostsFile { get; init; }  public int? KnownHostsLine { get; init; }   // ChangedKey, Revoked (file:line, as ssh reports)
+    public string? ExpectedFingerprint { get; init; }                     // ChangedKey: "SHA256:..." of the key on record
+}
+public enum SshHostKeyRejectionReason { RejectedByVerifier, ChangedKey, Revoked, CertificateInvalid,
+    PlainKeyWhereCertificateRequired, UserDeclined, UnknownAndNoPrompt }
+public enum SshCertificateProblem { Malformed, WrongType, UnknownCriticalOption, DisallowedSignatureAlgorithm,
+    Expired, NotYetValid, NoMatchingPrincipal, UntrustedCertificateAuthority, VerificationFailed }
+public sealed record SshHostKeyInfo(string AlgorithmName, int KeyLengthBits, string Sha256Fingerprint, byte[] RawKey) {
+    public SshHostCertificate? Certificate { get; init; }  public byte[]? CertificateBlob { get; init; }  public bool IsCertificate { get; }
+}
+```
+
+**Things a consumer should know**
+
+- The closure workaround for the rejection reason can go: catch `SshHostKeyRejectedException` and switch on `Reason`.
+  A custom `AsyncSshHostKeyVerifier` may also *throw* it to reject with a reason.
+- **A certificate SSH.NET itself rejects during key exchange never reaches any verifier** (expired, not-yet-valid,
+  bad signature): it still surfaces as `SshHostKeyRejectedException` (`CertificateInvalid`, `Expired` / `NotYetValid`,
+  or `VerificationFailed` for anything else — invalid CA signature, or a KEX signature not made by the certified key).
+- `SshHostKeyInfo.RawKey` / `Sha256Fingerprint` are now the exact wire bytes the server sent (previously SSH.NET's
+  `BigInteger` re-encoding — identical when SSH.NET's was right). For a certificate they are the *certified key*
+  (matching `ssh-keygen -l` on the cert file); the certificate is `CertificateBlob`.
+- Render `CertificateKeyId` / `CertificatePrincipals` in the CA prompt as **plain text** — they are chosen by whoever
+  runs the server; the CA `Fingerprint` is what the user is actually vouching for.
+- If recording a new entry fails (read-only file, permissions), the connect fails — trust is never granted unrecorded.
+- Concurrent handshakes to one unknown host prompt once (serialized per `known_hosts` file within the process).
+- Not implemented (backlog): IP-address matching, KRLs, `ssh_config` beyond the file path, `VerifyHostKeyDNS`,
+  `KnownHostsCommand`, and ssh's "prefer the key types already known for this host" algorithm ordering.
 
 ## Validation so far
 

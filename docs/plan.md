@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-21 (story 16, async SSH host key verification, done — see below; story 15, RPC streaming / `DOMAIN_OPEN_GRAPHICS`, done hermetically — see below. Stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
+**Last updated:** 2026-09-21 (story 17, OpenSSH-standard host verification (`known_hosts` + host certificates), done — see below; story 16, async SSH host key verification, done — see below; story 15, RPC streaming / `DOMAIN_OPEN_GRAPHICS`, done hermetically — see below. Stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -735,3 +735,109 @@ the verifier also *ran* with no context); end-to-end over a real SSH handshake
 against the Testcontainers `sshd` (`SshHostKeyVerifierIntegrationTests`) —
 async accept for both transports, reject for both, sync reject, cancel while
 prompting, and the timeout bound.
+
+### 17. OpenSSH-standard host verification (`known_hosts`, `@cert-authority` host certificates, `@revoked`).
+
+**Status: done, 2026-09-21.** Priority request from `avalonia-virt-manager`
+(whose product decision is: adopt OpenSSH's own formats and semantics, no
+bespoke trust store — the audience is sysadmins/enterprise). Motivation: the
+real lab host presents an OpenSSH **host certificate**
+(`ssh-ed25519-cert-v01@openssh.com`), the normative enterprise model. Pinning
+the cert's fingerprint breaks on every renewal, pinning the embedded key breaks
+when the key rotates with the cert, so the trust anchor must be the CA key.
+
+**What was built** (`src/NetfxLibvirt/Transport/OpenSsh/`, namespace
+`NetfxLibvirt.Transport.OpenSsh`; final signatures in `docs/status.md`):
+`OpenSshKnownHosts` (parse/match/append), `OpenSshPublicKey`,
+`OpenSshPattern`, `SshHostCertificate` (facts + policy),
+`OpenSshHostKeyVerifier.Create(options)` → `AsyncSshHostKeyVerifier` +
+`GetTrustState`, `IOpenSshHostKeyPrompt`; and in `Transport/`,
+`SshHostKeyRejectedException.Reason` (+ `SshHostKeyRejectionReason`,
+`SshCertificateProblem`) and `SshHostKeyInfo.{Certificate,CertificateBlob}`.
+
+**Scope decision — this library does NOT verify certificate cryptography, and
+must not.** Reviewed adversarially and agreed with the user: reimplementing
+signature verification/parsing in agent-written code is high cost and adds a
+*parser-differential* risk (policy read from a second parse of the same bytes
+SSH.NET verified). Instead, SSH.NET does the cryptography and this library adds
+the trust policy SSH.NET deliberately leaves to the consumer. Findings that
+shaped it (SSH.NET 2026.0.0, sources at tag; `docs/upstream/`):
+
+- SSH.NET verifies, *before* raising `HostKeyReceived`: the KEX signature
+  against the key **embedded in the certificate** (so the peer provably holds
+  it — pinned by a sentinel test), the CA signature (against the CA key
+  embedded in the cert — an integrity check, not trust), and the validity
+  window (real clock, `UtcNow`).
+- SSH.NET does **not** check type (a USER cert is accepted as a host cert),
+  principals, critical options, or CA trust; it accepts SHA-1 (`ssh-rsa`) CA
+  signatures. All confirmed against real handshakes/real `ssh-keygen` certs.
+- Consequently a cert SSH.NET rejects (expired, not-yet-valid, bad signature)
+  **never reaches the verifier**. `SshHostKeyVerification` maps it afterwards
+  from public facts: validity window → `Expired`/`NotYetValid`; anything else →
+  `VerificationFailed` (the honest umbrella; we don't re-run SSH.NET's crypto
+  to pick which).
+- The raw wire blob is obtained by wrapping the **public**
+  `ConnectionInfo.HostKeyAlgorithms` factories (they receive the wire bytes).
+  Gotcha found by the integration tests: SSH.NET reuses that same dictionary to
+  build the *CA key's* algorithm while verifying the cert, so "the last
+  capture" is the CA; captures are matched to the event by object identity /
+  exact bytes. No upstream change needed. (Also: the event's `HostKey` is a
+  `BigInteger` re-encoding of the key, not the wire bytes; `RawKey` is now the
+  exact wire blob.)
+- A real `sshd` cannot serve a certificate with a bad CA signature — OpenSSH
+  verifies it when loading, and silently falls back to a plain host key. So
+  SSH.NET's signature checks are pinned by `SshNetCertificateVerificationSentinelTests`,
+  which drive SSH.NET's *real* verification code through its public API
+  (`HostKeyAlgorithms` factory + `KeyHostAlgorithm.VerifySignature`) with real
+  `ssh-keygen` certificates and real private keys. **If an SSH.NET upgrade
+  makes any of those fail, hold the upgrade.**
+
+**Behaviour** (decision table is on `OpenSshHostKeyVerifier`'s doc):
+plain-key semantics as OpenSSH (same type + different key ⇒ `ChangedKey` with
+`file:line`; other types only ⇒ unknown ⇒ prompt; `@revoked` ⇒ reject);
+`RequireCertificateWhenCaCovers` (default true: a plain key from a CA-covered
+host is rejected, no TOFU fallback); certificates: HOST type, no critical
+options, CA signature algorithm allow-list (SHA-1 `ssh-rsa` only with
+`AllowSha1CaSignatures`, default off — deviation from the original request,
+which listed `ssh-rsa` as supported), `TimeProvider` window `[after, before)`,
+**explicit** principal match (empty principals match nothing — stricter than
+OpenSSH), CA pinned by exact key match against `@cert-authority`; no CA
+covering the host ⇒ "trust this CA for this host?" and on yes append
+`@cert-authority <host|[host]:port> <type> <base64>` (the cert and its embedded
+key are never pinned). Trust decisions are serialized per `known_hosts` file
+and re-evaluated after taking the lock; a failed write fails the connect.
+
+**Not implemented** (deliberate): matching by IP (`CheckHostIP`), `Host`
+canonicalisation/aliases, preferring already-known host key algorithms during
+negotiation (ssh reorders `HostKeyAlgorithms`; without it a host known only by
+one key type may offer another and prompt — `TrustState.Known` documents this).
+
+**Verification.** 371 tests total (0 failed). New: hermetic tests over
+checked-in **real `ssh-keygen` artifacts** (`tests/.../Fixtures/OpenSsh/`,
+regenerated by `generate.sh`: ed25519/RSA/ECDSA CAs; valid, expired,
+not-yet-valid, wrong principal, empty principals, wildcard principal, user
+cert as host, wrong CA, tampered signature, critical option, SHA-1 CA; plain,
+hashed, `@cert-authority`, `@revoked` known_hosts) with real OpenSSH as an
+**oracle** (`ssh-keygen -F` for host matching incl. hashed entries, `ssh-keygen -L`
+for certificate fields — skipped if absent); the sentinels above;
+real-handshake tests against real `sshd` presenting real host certificates in
+the Testcontainers fixture (every CA type × certified key type; trust-this-CA
+flow; wrong type/principal/CA/critical option/SHA-1; expired/not-yet-valid;
+plain-key TOFU/changed/revoked/CA-required; concurrent prompts; cancel while
+prompting); and an env-gated lab-host test (`LabHostOpenSshVerifierTests`,
+skips unless `NETFX_LIBVIRT_LAB_SSH_*` is set — still to be run against the real
+lab host). The security-critical logic was **mutation-checked** (13 mutations:
+CA-covers policy, changed-key type match, empty-principals, any-CA-accepted,
+revocation, post-lock re-evaluation, lock removal, negation veto, validity
+boundary, HOST-type, critical options, RawKey revocation, append newline — every
+one caught after adding a test for the one that survived). An adversarial
+security review found no high-confidence issues; it led to hardening: host
+names that could alter a `known_hosts` line (whitespace, `,`, `|`, `*`, brackets…)
+are refused, and a CA signature algorithm must belong to the CA's key type.
+
+**Follow-ups / backlog only (not built):** KRL files (`RevokedKeys`);
+`ssh_config` parsing beyond `UserKnownHostsFile`; `VerifyHostKeyDNS`/SSHFP;
+`KnownHostsCommand`; IP-address matching; preferring known host key
+algorithms; upstream SSH.NET contributions (docs warning about
+type/principal/CA checks; exposing the raw certificate bytes) — drafts in
+`docs/upstream/`, undecided.

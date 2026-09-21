@@ -52,32 +52,43 @@ internal static class LibvirtdFixtureImageAcquisition
     /// pair (never copied into the image; see the Dockerfile).</summary>
     private static readonly string[] ImageInputFileNames = ["Dockerfile", "entrypoint.sh", "id_ecdsa.pub"];
 
-    public static async Task<IContainer> StartAsync(string dockerDirectory, int sshPort)
+    public static async Task<IContainer> StartAsync(string dockerDirectory, int sshPort, IEnumerable<int>? extraPorts = null)
     {
         var tag = ComputeImageTagFromInputFiles(dockerDirectory);
 
         if (!IsLocalBuildForced())
         {
-            var fromRegistry = await TryStartFromRegistryAsync(tag, sshPort).ConfigureAwait(false);
+            var fromRegistry = await TryStartFromRegistryAsync(tag, sshPort, extraPorts).ConfigureAwait(false);
             if (fromRegistry is not null)
             {
                 return fromRegistry;
             }
         }
 
-        return await BuildAndStartLocallyAsync(dockerDirectory, tag, sshPort).ConfigureAwait(false);
+        return await BuildAndStartLocallyAsync(dockerDirectory, tag, sshPort, extraPorts).ConfigureAwait(false);
+    }
+
+    /// <summary>Extra published ports (random host ports) — used by tests that start additional sshd instances inside the container.</summary>
+    private static ContainerBuilder WithExtraPorts(ContainerBuilder builder, IEnumerable<int>? extraPorts)
+    {
+        foreach (var port in extraPorts ?? [])
+        {
+            builder = builder.WithPortBinding(port, assignRandomHostPort: true);
+        }
+
+        return builder;
     }
 
     private static bool IsLocalBuildForced() =>
         Environment.GetEnvironmentVariable(ForceLocalBuildEnvVar) is "1" or "true";
 
-    private static async Task<IContainer?> TryStartFromRegistryAsync(string tag, int sshPort)
+    private static async Task<IContainer?> TryStartFromRegistryAsync(string tag, int sshPort, IEnumerable<int>? extraPorts)
     {
         try
         {
-            var container = new ContainerBuilder($"{RegistryImageName}:{tag}")
+            var container = WithExtraPorts(new ContainerBuilder($"{RegistryImageName}:{tag}")
                 .WithImagePullPolicy(PullPolicy.Missing)
-                .WithPortBinding(sshPort, assignRandomHostPort: true)
+                .WithPortBinding(sshPort, assignRandomHostPort: true), extraPorts)
                 .WithWaitStrategy(Wait.ForUnixContainer().UntilInternalTcpPortIsAvailable(sshPort))
                 .Build();
             await container.StartAsync().ConfigureAwait(false);
@@ -92,7 +103,7 @@ internal static class LibvirtdFixtureImageAcquisition
         }
     }
 
-    private static async Task<IContainer> BuildAndStartLocallyAsync(string dockerDirectory, string tag, int sshPort)
+    private static async Task<IContainer> BuildAndStartLocallyAsync(string dockerDirectory, string tag, int sshPort, IEnumerable<int>? extraPorts)
     {
         var image = new ImageFromDockerfileBuilder()
             .WithName($"netfx-libvirt-integration-test-libvirtd:{tag}")
@@ -102,8 +113,8 @@ internal static class LibvirtdFixtureImageAcquisition
             .Build();
         await image.CreateAsync().ConfigureAwait(false);
 
-        var container = new ContainerBuilder(image)
-            .WithPortBinding(sshPort, assignRandomHostPort: true)
+        var container = WithExtraPorts(new ContainerBuilder(image)
+            .WithPortBinding(sshPort, assignRandomHostPort: true), extraPorts)
             .WithWaitStrategy(Wait.ForUnixContainer().UntilInternalTcpPortIsAvailable(sshPort))
             .Build();
         await container.StartAsync().ConfigureAwait(false);

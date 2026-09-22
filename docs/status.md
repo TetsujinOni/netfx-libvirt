@@ -281,8 +281,8 @@ public sealed record SshHostKeyInfo(string AlgorithmName, int KeyLengthBits, str
 
 ## `ssh_config` `Host` alias resolution (for consumers — `avalonia-virt-manager`)
 
-**Implementation commit:** see `docs/plan.md` story 20 for the commit(s) on `main` (picked up ahead of stories
-18–19 on priority request). **Design + findings:** `docs/plan.md` story 20.
+**Implementation commit: `d88febd`**, on `main` (picked up ahead of stories 18–19 on priority request).
+**Design + findings:** `docs/plan.md` story 20.
 
 The other half of "a consumer supplies only prompts and a file path" — resolves a `Host` alias (`~/.ssh/config`)
 to real connection parameters, the same way `ssh <alias>` would:

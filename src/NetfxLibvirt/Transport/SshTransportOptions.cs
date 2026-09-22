@@ -14,16 +14,43 @@ public sealed record SshTransportOptions
     public required string Username { get; init; }
 
     /// <summary>Password authentication. Mutually exclusive with
-    /// <see cref="PrivateKeyPath"/> in practice — if both are set,
-    /// <see cref="SshTransport.ConnectAsync"/> prefers the private key.</summary>
+    /// <see cref="PrivateKeyPath"/>/<see cref="PrivateKeyPaths"/> in
+    /// practice — if either is set, <see cref="SshTransport.ConnectAsync"/>
+    /// prefers the private key(s).</summary>
     public string? Password { get; init; }
 
-    /// <summary>Path to a private key file (any format <c>SSH.NET</c>'s
+    /// <summary>Path to a single private key file (any format <c>SSH.NET</c>'s
     /// <c>PrivateKeyFile</c> supports: OpenSSH, PKCS#1, PKCS#8, PuTTY,
-    /// ssh.com — RSA, DSA, ECDSA, and Ed25519 all included).</summary>
+    /// ssh.com — RSA, DSA, ECDSA, and Ed25519 all included). Mutually
+    /// exclusive with <see cref="PrivateKeyPaths"/> — set at most one of the
+    /// two (checked at the start of <see cref="SshTransport.ConnectAsync"/>,
+    /// before any network I/O). Prefer <see cref="PrivateKeyPaths"/> when a
+    /// caller has more than one candidate key (e.g. the several
+    /// <c>IdentityFile</c> entries <c>ssh_config</c>'s
+    /// <c>NetfxLibvirt.Transport.OpenSsh.OpenSshConfig</c> resolves) —
+    /// trying candidates one connection at a time, as this project's own
+    /// consumer originally had to, costs a full extra TCP+KEX+auth round
+    /// trip per miss and defeats server-side rate limiting on failed
+    /// attempts; SSH.NET natively offers every key within a single session,
+    /// exactly like real <c>ssh</c> does.</summary>
     public string? PrivateKeyPath { get; init; }
 
-    /// <summary>Passphrase for <see cref="PrivateKeyPath"/>, if it's encrypted.</summary>
+    /// <summary>Several candidate private key files, all offered within one
+    /// SSH session (one <c>PrivateKeyAuthenticationMethod</c>, in order) —
+    /// see <see cref="PrivateKeyPath"/>'s doc for why this exists. Every
+    /// path must exist and be loadable; unlike
+    /// <c>OpenSshConfig</c>'s own default-candidate fallback (which silently
+    /// drops candidates that don't exist locally, matching real ssh), this
+    /// list is taken as given — filter it yourself first if some entries
+    /// might be missing. Uses the same <see cref="PrivateKeyPassphrase"/>
+    /// for every entry; if your candidates need different passphrases (or
+    /// some are unencrypted and others aren't), load them upstream (e.g.
+    /// into an SSH agent) or connect once per differently-passphrased key
+    /// instead. Mutually exclusive with <see cref="PrivateKeyPath"/>.</summary>
+    public IReadOnlyList<string>? PrivateKeyPaths { get; init; }
+
+    /// <summary>Passphrase for <see cref="PrivateKeyPath"/>, or shared
+    /// across every <see cref="PrivateKeyPaths"/> entry, if encrypted.</summary>
     public string? PrivateKeyPassphrase { get; init; }
 
     /// <summary>Synchronous host key verifier. **Exactly one** of this and

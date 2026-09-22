@@ -77,6 +77,46 @@ public class OpenSshConfigTests : IDisposable
     }
 
     [Fact]
+    public void NoIdentityFileConfigured_FallsBackToSshsBuiltInCandidates_FilteredToOnesThatExist()
+    {
+        var sshDir = _temp.File("sshdir");
+        Directory.CreateDirectory(sshDir);
+        File.WriteAllText(Path.Combine(sshDir, "id_ed25519"), "fake key");
+        File.WriteAllText(Path.Combine(sshDir, "id_ecdsa_sk"), "fake key"); // out of the real candidate order, to prove order isn't just "as created"
+
+        var candidates = OpenSshConfig.DefaultIdentityFilesUnder(sshDir).ToList();
+
+        // ssh's own order: id_rsa, id_ecdsa, id_ecdsa_sk, id_ed25519, id_ed25519_sk — missing ones simply absent.
+        Assert.Equal(
+            [Path.Combine(sshDir, "id_ecdsa_sk"), Path.Combine(sshDir, "id_ed25519")],
+            candidates);
+    }
+
+    [Fact]
+    public void NoIdentityFileConfigured_Resolve_IsWiredToTheRealProfileSshDirectory()
+    {
+        // What's actually in %USERPROFILE%\.ssh varies by machine (covered hermetically by
+        // DefaultIdentityFilesUnder's own test above) — here we only confirm Resolve()'s fallback routes to
+        // exactly that directory, by comparing against DefaultIdentityFilesUnder's own answer for it, whatever
+        // that happens to be. A test asserting Resolve() returns a fixed literal list would be non-portable.
+        var resolved = LoadConfig("Host lab\n  HostName lab.example\n").Resolve("lab");
+        var expected = OpenSshConfig.DefaultIdentityFilesUnder(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh"));
+
+        Assert.Equal(expected, resolved.IdentityFiles);
+    }
+
+    [Fact]
+    public void ExplicitIdentityFile_IsNeverFilteredByExistence_UnlikeTheDefaultFallback()
+    {
+        // Confirmed against real ssh -G: an explicitly configured (even nonexistent) IdentityFile is still
+        // offered — only the IMPLICIT defaults get filtered. A typo in a real config should stay visible.
+        var resolved = LoadConfig("Host lab\n  IdentityFile ~/.ssh/definitely_does_not_exist_anywhere\n").Resolve("lab");
+
+        Assert.Single(resolved.IdentityFiles);
+        Assert.EndsWith("definitely_does_not_exist_anywhere", resolved.IdentityFiles[0]);
+    }
+
+    [Fact]
     public void UnsetHostName_DefaultsToTheHostArgumentItself_MatchingRealSsh()
     {
         AssertMatchesOracle("Host lab\n  User admin\n", "lab", ("hostname", r => r.HostName));
@@ -467,7 +507,9 @@ public class OpenSshConfigTests : IDisposable
         var resolved = config.Resolve("anything");
         Assert.Equal("anything", resolved.HostName);
         Assert.Null(resolved.User);
-        Assert.Empty(resolved.IdentityFiles);
+        // Not asserting IdentityFiles here: an empty config still falls back to ssh's built-in default
+        // candidates (see NoIdentityFileConfigured_FallsBackToSshsBuiltInCandidates_...), which legitimately
+        // depend on what's in the REAL %USERPROFILE%\.ssh on whatever machine runs this test.
     }
 
     [Fact]

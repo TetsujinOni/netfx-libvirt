@@ -108,8 +108,24 @@ public static class SshTransport
     }
 
     /// <summary>Shared with <see cref="SshPortForward"/> so both connect using the exact same auth logic.</summary>
+    /// <exception cref="ArgumentException"><see cref="SshTransportOptions.PrivateKeyPath"/> and <see cref="SshTransportOptions.PrivateKeyPaths"/> are both set.</exception>
     internal static AuthenticationMethod BuildAuthenticationMethod(SshTransportOptions options)
     {
+        if (options.PrivateKeyPath is not null && options.PrivateKeyPaths is not null)
+        {
+            throw new ArgumentException(
+                $"Set only one of {nameof(SshTransportOptions.PrivateKeyPath)} or {nameof(SshTransportOptions.PrivateKeyPaths)}, not both — which one should decide?",
+                nameof(options));
+        }
+
+        if (options.PrivateKeyPaths is { Count: > 0 } paths)
+        {
+            // One PrivateKeyAuthenticationMethod offering every key within a single session, exactly like real
+            // ssh — not one connection attempt per candidate (see PrivateKeyPaths' doc for why that matters).
+            var keyFiles = paths.Select(path => (IPrivateKeySource)new PrivateKeyFile(path, options.PrivateKeyPassphrase)).ToArray();
+            return new PrivateKeyAuthenticationMethod(options.Username, keyFiles);
+        }
+
         if (options.PrivateKeyPath is not null)
         {
             var keyFile = new PrivateKeyFile(options.PrivateKeyPath, options.PrivateKeyPassphrase);

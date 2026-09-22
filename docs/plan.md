@@ -977,3 +977,46 @@ sensitivity against a real `sshd` (currently case-insensitive, assumed by
 analogy to `known_hosts`, never independently verified — flagged above);
 `Match` support (would need a policy for what, if anything, `Match exec` is
 allowed to do); scoped `Include`.
+
+**Addendum — multi-key auth (same day).** `avalonia-virt-manager` (building
+the host-list feature this story feeds) reported hitting this for real: with
+no explicit `IdentityFile`, `ssh_config`'s real candidate list is several
+keys tried *in order against the server*, not "pick whichever one happens to
+exist locally first" — their stopgap app-side workaround (open a whole new
+SSH connection per candidate on auth failure) was correct but costly (a full
+extra TCP+KEX+auth round trip per miss) and made their real-lab-host test
+suite flakier under connection-burst load.
+
+Two real fixes landed from this, both found by checking against `ssh -G`
+rather than assumed:
+
+- **`OpenSshConfig.Resolve` was actually missing ssh's own default
+  `IdentityFile` candidate list.** Confirmed: `ssh -G` lists `id_rsa`,
+  `id_ecdsa`, `id_ecdsa_sk`, `id_ed25519`, `id_ed25519_sk` even with *no*
+  `IdentityFile` directive in the config at all — this library returned an
+  empty list instead. Fixed: falls back to that exact list (filtered to
+  files that exist locally — confirmed real ssh does the same for its
+  *implicit* defaults, but does **not** filter an *explicitly* configured
+  `IdentityFile` the same way, so a typo there stays visible rather than
+  silently vanishing).
+- **`SshTransportOptions` gained `PrivateKeyPaths`** (plural, alongside the
+  existing singular `PrivateKeyPath` — mutually exclusive, same "which one
+  should decide?" `ArgumentException` pattern as `VerifyHostKey`/
+  `VerifyHostKeyAsync`). `BuildAuthenticationMethod` passes every path as
+  its own `IPrivateKeySource` to **one** `PrivateKeyAuthenticationMethod` —
+  SSH.NET already supports offering multiple keys within a single session
+  (`params IPrivateKeySource[] keyFiles`), exactly like real `ssh`; this
+  just exposes it, so a consumer wiring `OpenSshConfigHost.IdentityFiles`
+  straight through no longer needs the reconnect-per-candidate workaround.
+
+10 new tests (433 total, 0 failed): the default-candidate list itself
+(hermetic, via a testable `DefaultIdentityFilesUnder(directory)` seam — the
+real `%USERPROFILE%\.ssh` contents aren't asserted directly, since that's
+not portable across machines; a separate test confirms `Resolve()` is wired
+to it by comparing against that seam's own answer for the real profile
+directory, whatever it is), that an explicit `IdentityFile` is never
+existence-filtered, and `BuildAuthenticationMethod`'s single-key/multi-key/
+ambiguous/password-fallback paths (using the real checked-in `host_ed25519`/
+`attacker_ed25519` fixture keys, not fakes). Mutation-checked (dropping the
+ambiguity check, dropping the existence filter, and disabling the fallback
+entirely were all initially uncaught — each got a test).

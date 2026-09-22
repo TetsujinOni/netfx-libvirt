@@ -298,7 +298,9 @@ var transportOptions = new SshTransportOptions
     Host = resolved.HostKeyLookupName,             // NOT resolved.HostName — see below
     Port = resolved.Port ?? 22,
     Username = resolved.User ?? currentOsUsername,
-    // PrivateKeyPath = resolved.IdentityFiles.FirstOrDefault(File.Exists), or offer a picker if several
+    // Offer every candidate within ONE session — not a reconnect per candidate (SshTransportOptions.PrivateKeyPath,
+    // singular, still works for the single-key case; PrivateKeyPaths and PrivateKeyPath are mutually exclusive).
+    PrivateKeyPaths = resolved.IdentityFiles.Count > 0 ? resolved.IdentityFiles : null,
     RemoteUri = "qemu:///system",
     VerifyHostKeyAsync = OpenSshHostKeyVerifier.Create(new OpenSshHostKeyVerifierOptions
     {
@@ -325,7 +327,8 @@ public sealed record OpenSshConfigHost(
     string HostName,                        // defaults to the alias itself when unset
     string? HostKeyAlias,                   // see HostKeyLookupName below
     string? User, int? Port,
-    IReadOnlyList<string> IdentityFiles,    // cumulative across matching blocks; tilde-expanded
+    IReadOnlyList<string> IdentityFiles,    // cumulative across matching blocks; tilde-expanded; falls back to
+                                             // ssh's own built-in candidates (filtered to ones that exist) when unset
     bool? IdentitiesOnly,
     IReadOnlyList<string>? UserKnownHostsFile,   // tilde-expanded; null if unset
     IReadOnlyList<string> GlobalKnownHostsFiles, // tilde-expanded; empty if unset
@@ -359,6 +362,12 @@ public sealed record OpenSshConfigDiagnostic(string File, int Line, string Messa
   resolution — never thrown, never half-applied.
 - Not implemented (backlog): `ProxyJump`/`ProxyCommand`, `CanonicalizeHostname`, algorithm-list directives,
   `%`-token expansion beyond `~`, scoped `Include`.
+- **`SshTransportOptions.PrivateKeyPaths`** (plural — new, alongside the existing singular `PrivateKeyPath`,
+  mutually exclusive with it) offers every candidate key within **one** SSH session
+  (`PrivateKeyAuthenticationMethod`'s native multi-key support), instead of a separate connection attempt per
+  candidate. Pass `resolved.IdentityFiles` straight through — the library already filters ssh's own implicit
+  default candidates to ones that exist; an explicitly configured `IdentityFile` is not filtered, so pre-check
+  existence yourself if you pass one of those through directly. See `docs/plan.md` story 20's addendum.
 
 ## Validation so far
 

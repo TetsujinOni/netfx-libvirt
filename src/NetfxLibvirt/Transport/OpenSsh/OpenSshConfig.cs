@@ -27,7 +27,7 @@ public sealed record OpenSshConfigDiagnostic(string File, int Line, string Messa
 /// confirmed against real <c>ssh -G</c>. <see langword="null"/>/empty means nothing in the config set it.</summary>
 /// <param name="HostName">Defaults to the host name passed to <see cref="OpenSshConfig.Resolve"/> itself when unset — this is what OpenSSH does (confirmed via <c>ssh -G</c>), so it is filled in here rather than left <see langword="null"/>.</param>
 /// <param name="HostKeyAlias">**Use this (falling back to <see cref="HostName"/>) as the host for `known_hosts`/certificate lookups, not the alias the user typed** — this is exactly what `HostKeyAlias` is for (`ssh_config(5)`): letting host-key trust follow a stable identity when the actual network target varies (port forwards, load balancers, `HostName 127.0.0.1`, …).</param>
-/// <param name="IdentityFiles">Tilde-expanded to an absolute path; any other <c>%</c>-token (`%d`, `%h`, `%r`, …) is left as literal text — confirmed <c>ssh -G</c> does the same (token substitution happens later, at connect time in real ssh, not at config-resolution time).</param>
+/// <param name="IdentityFiles">Tilde-expanded to an absolute path; any other <c>%</c>-token (`%d`, `%h`, `%r`, …) is left as literal text — confirmed <c>ssh -G</c> does the same (token substitution happens later, at connect time in real ssh, not at config-resolution time). When no <c>IdentityFile</c> directive matches, falls back to ssh's own built-in candidates under <c>~/.ssh</c> (<c>id_rsa</c>, <c>id_ecdsa</c>, <c>id_ecdsa_sk</c>, <c>id_ed25519</c>, <c>id_ed25519_sk</c> — confirmed against real <c>ssh -G</c>), filtered to ones that exist; an EXPLICITLY configured entry is never filtered this way, so a typo stays visible instead of silently disappearing. Never build an <c>IPrivateKeySource</c> per candidate one connection attempt at a time — see <see cref="NetfxLibvirt.Transport.SshTransportOptions.PrivateKeyPaths"/>, which offers every candidate within a single SSH session.</param>
 /// <param name="UserKnownHostsFile">Space-separated in the file; tilde-expanded. <see langword="null"/> if unset (use <see cref="OpenSshKnownHosts.DefaultUserFilePath"/>).</param>
 /// <param name="GlobalKnownHostsFiles">Tilde-expanded; empty if unset (use <see cref="OpenSshKnownHosts.DefaultGlobalFilePaths"/>).</param>
 public sealed record OpenSshConfigHost(
@@ -107,6 +107,17 @@ public sealed class OpenSshConfig
     public static string DefaultUserFilePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh", "config");
 
+    /// <summary>ssh's own built-in <c>IdentityFile</c> candidate file NAMES, in the order it tries them,
+    /// confirmed against real <c>ssh -G</c>. The <c>_sk</c> entries are FIDO2/security-key resident keys; this
+    /// library doesn't otherwise support those, but real ssh lists them too, so this stays a faithful mirror.</summary>
+    private static readonly string[] DefaultIdentityFileNames = ["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk"];
+
+    /// <summary>The default candidates under a given <c>.ssh</c> directory, filtered to ones that actually
+    /// exist — separated from <see cref="Resolve"/>'s real <c>%USERPROFILE%\.ssh</c> for testability (a unit
+    /// test can't durably assert which keys exist in the real profile directory on every machine this runs on).</summary>
+    internal static IEnumerable<string> DefaultIdentityFilesUnder(string sshDirectory) =>
+        DefaultIdentityFileNames.Select(name => Path.Combine(sshDirectory, name)).Where(File.Exists);
+
     /// <summary>Loads <paramref name="path"/> (default <see cref="DefaultUserFilePath"/>), following top-level <c>Include</c> directives. A missing file resolves to an empty config (matching real `ssh`, which treats no config file as normal); an existing-but-unreadable file throws.</summary>
     public static OpenSshConfig Load(string? path = null)
     {
@@ -162,6 +173,16 @@ public sealed class OpenSshConfig
                         break;
                 }
             }
+        }
+
+        // No explicit IdentityFile anywhere: real ssh still tries its own built-in candidate list (confirmed:
+        // `ssh -G` lists all five even with no IdentityFile directive at all), filtered to ones that actually
+        // exist locally (confirmed separately: an EXPLICITLY configured IdentityFile is NOT filtered this way —
+        // it's still offered even if missing, so a typo stays visible instead of silently vanishing; only the
+        // implicit defaults are filtered, exactly like `ssh` itself only offers default keys it can find).
+        if (identityFiles.Count == 0)
+        {
+            identityFiles.AddRange(DefaultIdentityFilesUnder(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh")));
         }
 
         return new OpenSshConfigHost(

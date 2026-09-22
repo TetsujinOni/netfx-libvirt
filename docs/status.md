@@ -1,6 +1,6 @@
 # netfx-libvirt — Status
 
-**Last updated:** 2026-09-21 (OpenSSH-standard host verification — `known_hosts`, `@cert-authority` host certificates, `@revoked` — landed, see "OpenSSH host verification" below and plan story 17; async SSH host key verification landed — see "Completed" below; RPC streaming landed, and real remote graphics access via SSH port-forward — validated against a real domain's real VNC server, see "Completed" below; plan stories 1–11 done and validated against real infra — see `docs/plan.md`)
+**Last updated:** 2026-09-22 (`ssh_config` `Host` alias resolution landed — see "`ssh_config` `Host` alias resolution" below and plan story 20; OpenSSH-standard host verification — `known_hosts`, `@cert-authority` host certificates, `@revoked` — landed, see "OpenSSH host verification" below and plan story 17; async SSH host key verification landed — see "Completed" below; RPC streaming landed, and real remote graphics access via SSH port-forward — validated against a real domain's real VNC server, see "Completed" below; plan stories 1–11 done and validated against real infra — see `docs/plan.md`)
 
 ## What this is
 
@@ -178,12 +178,13 @@ Solution `netfx-libvirt.slnx` with four projects:
 | Real remote graphics access | `Transport/SshPortForward` — an independent SSH local port forward (SSH.NET's `ForwardedPortLocal`), the actual fix for a domain whose graphics server only listens on the hypervisor's loopback interface (`listen='127.0.0.1'`, libvirt's actual default), which a raw socket dial to the hypervisor's routable IP can't reach. Requested by `avalonia-virt-manager` against a real domain, `Win2019-Dev-Oni` on `srv-l-vm01`. **`REMOTE_PROC_DOMAIN_OPEN_GRAPHICS` was tried first and found genuinely unusable remotely** — it's FD-passing (`SCM_RIGHTS`), confirmed against libvirt's real C client and go-libvirt's own generated wrapper, and removed once real-host validation hit an actual libvirt error (`"internal error: No FD available at slot 0"`) rather than working. **Validated end-to-end against the real domain**: a real VNC server banner (`RFB 003.008\n`) received through the forwarded port from `Win2019-Dev-Oni`'s actual graphics server. See `docs/plan.md` story 15 for the full correction trail. |
 | Async SSH host key verification | `Transport/{AsyncSshHostKeyVerifier,SshHostKeyVerification,SshHostKeyRejectedException}` + `SshTransportOptions.{VerifyHostKeyAsync,ConnectTimeout}` — lets a consumer ask the user "trust this host?" *during* the handshake (real trust-on-first-use instead of blind auto-pin). Exactly one of `VerifyHostKey`/`VerifyHostKeyAsync` must be set (checked before any network I/O); the async verifier runs on the thread pool so it cannot deadlock against a caller's `SynchronizationContext`; cancelling the connect dismisses a pending prompt and surfaces `OperationCanceledException`; a rejected key is a distinct `SshHostKeyRejectedException` carrying the offered `SshHostKeyInfo`. SSH.NET bounds the handshake (including the prompt) with a 30 s timeout, hence `ConnectTimeout`. 20 tests, hermetic plus end-to-end over a real SSH handshake. See `docs/plan.md` story 16. |
 | OpenSSH host verification | `Transport/OpenSsh/*` + `SshHostKeyRejectedException.Reason` — OpenSSH `known_hosts` (hashed names, wildcards, `[host]:port`, `@cert-authority`, `@revoked`) and host-certificate policy on top of SSH.NET's own certificate cryptography; prompts for new keys / new CAs; real-`ssh-keygen` fixtures, real-`sshd` handshakes, OpenSSH-as-oracle tests, mutation-checked, and validated against the real lab host (`srv-l-vm01`, which presents exactly the motivating case — an `ssh-ed25519-cert-v01@openssh.com` host certificate signed by an ECDSA CA). See the section below and `plan.md` story 17. |
+| `ssh_config` `Host` alias resolution | `Transport/OpenSsh/OpenSshConfig.cs` — resolves a `Host` alias to `HostName`/`User`/`Port`/`IdentityFile`/`HostKeyAlias`/known_hosts file paths/`StrictHostKeyChecking`/etc., top-level `Include`, everything verified against real `ssh -F ... -G`. See the section below and `plan.md` story 20. |
 
 ## OpenSSH host verification (for consumers — `avalonia-virt-manager`)
 
-**Implementation commit: `a84c27d`** on branch `claude/elastic-chebyshev-c3d1a7` (not pushed; the docs-only
-follow-up that records this hash comes right after it).
-**Design + findings:** `docs/plan.md` story 17. **Upstream drafts (undecided, not filed):** `docs/upstream/`.
+**Implementation commit: `a84c27d`**, on `main` since `c64f81a` (pushed, no PR — this repo's
+established pattern; see `docs/plan.md` story 17's own commit history for the follow-ups on top).
+**Design + findings:** `docs/plan.md` story 17.
 
 A consumer supplies only a prompt and (optionally) a file path. Wire it in with:
 
@@ -274,8 +275,90 @@ public sealed record SshHostKeyInfo(string AlgorithmName, int KeyLengthBits, str
   runs the server; the CA `Fingerprint` is what the user is actually vouching for.
 - If recording a new entry fails (read-only file, permissions), the connect fails — trust is never granted unrecorded.
 - Concurrent handshakes to one unknown host prompt once (serialized per `known_hosts` file within the process).
-- Not implemented (backlog): IP-address matching, KRLs, `ssh_config` beyond the file path, `VerifyHostKeyDNS`,
+- Not implemented (backlog): IP-address matching, KRLs, `VerifyHostKeyDNS`,
   `KnownHostsCommand`, and ssh's "prefer the key types already known for this host" algorithm ordering.
+  (`ssh_config` itself is now covered — see the next section.)
+
+## `ssh_config` `Host` alias resolution (for consumers — `avalonia-virt-manager`)
+
+**Implementation commit:** see `docs/plan.md` story 20 for the commit(s) on `main` (picked up ahead of stories
+18–19 on priority request). **Design + findings:** `docs/plan.md` story 20.
+
+The other half of "a consumer supplies only prompts and a file path" — resolves a `Host` alias (`~/.ssh/config`)
+to real connection parameters, the same way `ssh <alias>` would:
+
+```csharp
+using NetfxLibvirt.Transport.OpenSsh;
+
+var config = OpenSshConfig.Load();               // default ~/.ssh/config; missing file => empty config
+var resolved = config.Resolve("lab");             // "lab" is whatever the user typed/picked
+
+var transportOptions = new SshTransportOptions
+{
+    Host = resolved.HostKeyLookupName,             // NOT resolved.HostName — see below
+    Port = resolved.Port ?? 22,
+    Username = resolved.User ?? currentOsUsername,
+    // PrivateKeyPath = resolved.IdentityFiles.FirstOrDefault(File.Exists), or offer a picker if several
+    RemoteUri = "qemu:///system",
+    VerifyHostKeyAsync = OpenSshHostKeyVerifier.Create(new OpenSshHostKeyVerifierOptions
+    {
+        Host = resolved.HostKeyLookupName,          // MUST match SshTransportOptions.Host, per story 17
+        Port = resolved.Port ?? 22,
+        UserKnownHostsFile = resolved.UserKnownHostsFile?.FirstOrDefault(),
+        GlobalKnownHostsFiles = resolved.GlobalKnownHostsFiles is { Count: > 0 } g ? g : null,
+        Prompt = myPrompt,
+    }),
+};
+```
+
+**Public surface** (`NetfxLibvirt.Transport.OpenSsh`):
+
+```csharp
+public sealed class OpenSshConfig {
+    public static string DefaultUserFilePath { get; }                       // %USERPROFILE%\.ssh\config
+    public static OpenSshConfig Load(string? path = null);                  // missing file => empty; unreadable => throws
+    public static OpenSshConfig Parse(string content, string sourceName = "<memory>", string? baseDirectory = null);
+    public OpenSshConfigHost Resolve(string host);
+    public IReadOnlyList<OpenSshConfigDiagnostic> Diagnostics { get; }      // malformed lines, at parse time
+}
+public sealed record OpenSshConfigHost(
+    string HostName,                        // defaults to the alias itself when unset
+    string? HostKeyAlias,                   // see HostKeyLookupName below
+    string? User, int? Port,
+    IReadOnlyList<string> IdentityFiles,    // cumulative across matching blocks; tilde-expanded
+    bool? IdentitiesOnly,
+    IReadOnlyList<string>? UserKnownHostsFile,   // tilde-expanded; null if unset
+    IReadOnlyList<string> GlobalKnownHostsFiles, // tilde-expanded; empty if unset
+    OpenSshStrictHostKeyChecking? StrictHostKeyChecking,
+    bool? HashKnownHosts, TimeSpan? ConnectTimeout) {
+    public string HostKeyLookupName { get; }     // HostKeyAlias ?? HostName — see below
+}
+public enum OpenSshStrictHostKeyChecking { Yes, No, Ask, AcceptNew }
+public sealed record OpenSshConfigDiagnostic(string File, int Line, string Message);
+```
+
+**Things a consumer should know**
+
+- **Use `HostKeyLookupName`, not `HostName`, for `OpenSshHostKeyVerifierOptions.Host`/`SshTransportOptions.Host`.**
+  This is exactly what real `ssh`'s `HostKeyAlias` directive is for: the host-key/certificate trust decision follows
+  a stable identity, not whichever address you're actually dialing right now (relevant for port forwards, load
+  balancers, `HostName 127.0.0.1`). Getting this backwards — trusting by `HostName` when `HostKeyAlias` is set —
+  would silently apply the wrong `known_hosts`/`@cert-authority` entry.
+- `ssh_config` `Host` pattern matching is **case-sensitive** — unlike `known_hosts`/certificate-principal matching
+  (case-insensitive). Confirmed against real `ssh -G`; easy to get backwards since both use the same glob syntax.
+- Every field is first-match-wins across matching `Host` blocks **except** `IdentityFiles`, which accumulates
+  across all of them, in file order.
+- `Match` (any form, including `Match host`) is **not evaluated** — real `ssh` would apply it, this library
+  doesn't (see `OpenSshConfig`'s class doc for why: `Match exec` means running a shell command while parsing a
+  config file, which this library will not do). A config relying on `Match` will resolve differently here than
+  under real `ssh`; `Diagnostics` flags every `Match` line encountered.
+- `Include` is only followed when it appears **outside** any `Host`/`Match` block (the common config.d-snippet
+  case) — nested `Include` is skipped with a diagnostic rather than approximated, since real `ssh` ANDs the
+  included file's own `Host` patterns with the enclosing block's.
+- A malformed value (`Port notanumber`, an unrecognized `StrictHostKeyChecking`) is diagnosed and excluded from
+  resolution — never thrown, never half-applied.
+- Not implemented (backlog): `ProxyJump`/`ProxyCommand`, `CanonicalizeHostname`, algorithm-list directives,
+  `%`-token expansion beyond `~`, scoped `Include`.
 
 ## Validation so far
 

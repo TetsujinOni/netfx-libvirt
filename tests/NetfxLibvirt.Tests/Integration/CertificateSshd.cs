@@ -163,7 +163,11 @@ internal sealed class CertificateSshd
 
     private static async Task ExecAsync(LibvirtdContainerFixture fixture, string script)
     {
-        var script2 = string.Join('\n', script.Split('\n').Select(l => l.TrimStart()));
+        // ReplaceLineEndings first: the C# source's own raw-string literals are CRLF whenever this file is
+        // checked out with core.autocrlf=true (the common Windows default — .gitattributes only pins .sh/
+        // Dockerfile/workflow-yml to LF, not .cs), and a bare Split('\n') would leave a trailing '\r' on every
+        // line, which corrupts the container's `sh -c` script (observed: "sh: 1: set: Illegal option -").
+        var script2 = string.Join('\n', script.ReplaceLineEndings("\n").Split('\n').Select(l => l.TrimStart()));
         var result = await fixture.Container.ExecAsync(["sh", "-c", script2]);
         if (result.ExitCode != 0)
         {

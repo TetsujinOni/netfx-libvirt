@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-21 (story 17, OpenSSH-standard host verification (`known_hosts` + host certificates), done — see below; story 16, async SSH host key verification, done — see below; story 15, RPC streaming / `DOMAIN_OPEN_GRAPHICS`, done hermetically — see below. Stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
+**Last updated:** 2026-09-22 (story 20, `ssh_config` `Host` alias resolution, done — see below; story 17, OpenSSH-standard host verification (`known_hosts` + host certificates), done — see below; story 16, async SSH host key verification, done — see below; story 15, RPC streaming / `DOMAIN_OPEN_GRAPHICS`, done hermetically — see below. Stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -880,3 +880,100 @@ transitive dependency needs calling out for consumers who care about that
 (this project's own stance: pure managed, no native interop — BouncyCastle is
 managed, so consistent with that, see the async-verifier commit's
 `docs/status.md` framing).
+
+### 20. `ssh_config` parsing — `Host` alias resolution.
+
+**Status: done.** Picked up out of order (priority request from
+`avalonia-virt-manager`, ahead of stories 18–19) — the `ssh_config` gap
+flagged as backlog when story 17 landed. `OpenSshConfig`
+(`src/NetfxLibvirt/Transport/OpenSsh/OpenSshConfig.cs`): resolves a `Host`
+alias to `HostName`/`User`/`Port`/`IdentityFile`s/`IdentitiesOnly`/
+`HostKeyAlias`/`UserKnownHostsFile`/`GlobalKnownHostsFile`/
+`StrictHostKeyChecking`/`HashKnownHosts`/`ConnectTimeout`, with top-level
+`Include` — everything verified directly against real `ssh -F ... -G`
+(Windows OpenSSH, the same oracle-testing pattern as story 17's
+`ssh-keygen -F`/`-L`), not assumed from `ssh_config(5)`. Full API in
+`docs/status.md`.
+
+**Real findings, each locked in by a test:**
+
+- **`ssh_config` `Host` pattern matching is case-***sensitive***, unlike
+  `known_hosts`/certificate-principal matching (case-insensitive, confirmed
+  in story 17).** Both use the same glob syntax, easy to assume they share
+  case rules too — they don't (`Host LAB` doesn't match a query of `lab`,
+  confirmed). `OpenSshPattern.Matches`/`MatchesList` gained an `ignoreCase`
+  parameter (default `true`, preserving story 17's existing callers) so
+  `OpenSshConfig` alone passes `false`. **Follow-up added to this section's
+  backlog below: story 17's certificate-principal matching was never
+  verified against a real `sshd`/`ssh-keygen -Y` for case sensitivity, only
+  assumed case-insensitive by analogy to `known_hosts` — worth confirming
+  before relying on it.**
+- **`ssh_config` `Host` pattern *lists* are whitespace-separated**
+  (`Host *.example !bad.example`), not comma-separated like `known_hosts`'
+  host field (confirmed: a literal comma is just part of one pattern, not a
+  separator) — re-joined with commas before reusing `OpenSshPattern`.
+- **`HostKeyAlias`**: the *correct*, real-OpenSSH mechanism for "use this
+  identity for host-key/certificate trust, not whatever name was typed" —
+  `OpenSshConfigHost.HostKeyLookupName` surfaces `HostKeyAlias ?? HostName`
+  so a consumer doesn't have to know to ask for it.
+  `OpenSshHostKeyVerifierOptions.Host`/`Port` must be resolved to this (or
+  `HostName`/`Port`), not the raw alias — documented on both records.
+- **`IdentityFile` accumulates across every matching `Host` block, in file
+  order; every other directive here is first-match-wins** — both confirmed
+  against `ssh -G`, matching `ssh_config(5)`'s "first obtained value" rule.
+- **`ssh -G` itself has a real bug/quirk on Windows**: given a drive-letter-
+  absolute `Include` path (`C:\...`), it silently treats it as relative and
+  prepends `~/.ssh/`, so the `Include` always "matches no files" — this
+  library's own path handling (`Path.IsPathFullyQualified`) doesn't have
+  that problem, so this one case is asserted directly rather than against
+  the oracle (documented in the test).
+- **`ssh -G` doesn't tilde-expand `IdentityFile`/`GlobalKnownHostsFile`
+  (token substitution happens later, at real connect time), but *does*
+  expand `UserKnownHostsFile`** — an inconsistency in `ssh -G` itself, not
+  something to replicate. This library expands `~` on all three (a consumer
+  needs to actually open the file), documented as a deliberate divergence
+  from the raw `-G` dump.
+- **A latent, unrelated bug found and fixed while verifying against the
+  Testcontainers fixture**: `CertificateSshd.ExecAsync` (story 17) built its
+  container shell script with a bare `Split('\n')`, which leaves a stray
+  `\r` on every line when the `.cs` source itself has CRLF line endings —
+  which it does by default on Windows (`core.autocrlf=true`; `.gitattributes`
+  only pins `.sh`/Dockerfile/workflow-yml to LF, not `.cs`). A fresh
+  `git worktree add` checkout hit this immediately (`sh: 1: set: Illegal
+  option -`); fixed with `string.ReplaceLineEndings("\n")` before splitting.
+  Any contributor on a fresh Windows clone would have hit the same thing.
+
+**Deliberately not supported** (see `OpenSshConfig`'s class doc for the
+individual reasoning): `Match` (any form, including `Match host` — real ssh
+evaluates it, this library doesn't, since `Match exec` would mean running
+arbitrary shell commands while parsing a config file); `Include` nested
+inside a `Host`/`Match` block (real ssh ANDs the included file's own `Host`
+patterns with the enclosing block's — subtle enough that approximating it
+risked silently misapplying trust-relevant settings); `%`-token expansion
+beyond `~`; `ProxyJump`/`ProxyCommand`; `CanonicalizeHostname`;
+algorithm-list directives. Malformed values (`Port notanumber`, an
+unrecognized `StrictHostKeyChecking`) are diagnosed **at parse time** and
+excluded from resolution — matching `OpenSshKnownHosts`' "resilient parse,
+diagnostics for a human, never throw on garbage input, never half-apply a
+bad line" precedent, not real `ssh`'s hard-fail-on-bad-config behavior.
+
+**Verification.** 423 tests total, 0 failed (7 skipped: the pre-existing
+manually-gated ones). New `OpenSshConfigTests` cross-checked against real
+`ssh -G` wherever the two systems' representations are actually comparable
+(documented in the test class where they aren't — e.g. `ssh -G` always
+prints a *resolved* `User`, defaulting to the local account, where this
+library returns `null` for "the config didn't set anything"). Mutation-
+checked the security-relevant logic (first-match-wins vs. cumulative
+semantics, `HostKeyAlias` fallback, the case-sensitivity fix, nested-Include
+rejection, parse-time value validation, the `Include` cycle guard — removing
+the cycle guard entirely crashed the test host via real unbounded recursion,
+confirming it's load-bearing, not just a nice-to-have). An adversarial
+security review (of `ssh_config` specifically — story 17's own review isn't
+re-litigated here) found nothing above the confidence bar for a finding;
+see `docs/status.md`.
+
+**Backlog:** confirm `SshHostCertificate`'s principal matching case-
+sensitivity against a real `sshd` (currently case-insensitive, assumed by
+analogy to `known_hosts`, never independently verified — flagged above);
+`Match` support (would need a policy for what, if anything, `Match exec` is
+allowed to do); scoped `Include`.

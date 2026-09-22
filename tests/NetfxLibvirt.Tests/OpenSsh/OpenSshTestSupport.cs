@@ -67,6 +67,37 @@ internal static class OpenSshFixtures
             return null;
         }
     }
+
+    /// <summary>Runs real <c>ssh -F &lt;file&gt; -G &lt;host&gt;</c> (print the fully-resolved configuration) as an
+    /// oracle for <see cref="OpenSshConfig"/>; <see langword="null"/> if <c>ssh</c> isn't available (callers skip).
+    /// Deliberately the plain <c>ssh</c> client, not <c>ssh-keygen</c> — <c>-G</c> is an `ssh`-only flag.</summary>
+    public static (int ExitCode, string Output)? RunSshConfigDump(string configFile, string host)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("ssh") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var arg in new[] { "-F", configFile, "-G", host })
+            {
+                psi.ArgumentList.Add(arg);
+            }
+
+            using var process = Process.Start(psi)!;
+            var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            return (process.ExitCode, output);
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Parses one directive's value out of <c>ssh -G</c>'s dump (one <c>keyword value</c> per line, lowercase keyword).</summary>
+    public static string? SshConfigDumpValue(string dump, string keyword) =>
+        dump.Split('\n')
+            .Select(l => l.TrimEnd('\r'))
+            .FirstOrDefault(l => l.StartsWith(keyword + " ", StringComparison.Ordinal))
+            ?[(keyword.Length + 1)..];
 }
 
 /// <summary>A clock frozen at a chosen instant.</summary>

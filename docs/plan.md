@@ -761,7 +761,7 @@ signature verification/parsing in agent-written code is high cost and adds a
 *parser-differential* risk (policy read from a second parse of the same bytes
 SSH.NET verified). Instead, SSH.NET does the cryptography and this library adds
 the trust policy SSH.NET deliberately leaves to the consumer. Findings that
-shaped it (SSH.NET 2026.0.0, sources at tag; `docs/upstream/`):
+shaped it (SSH.NET 2026.0.0, sources at tag):
 
 - SSH.NET verifies, *before* raising `HostKeyReceived`: the KEX signature
   against the key **embedded in the certificate** (so the peer provably holds
@@ -840,12 +840,13 @@ are refused, and a CA signature algorithm must belong to the CA's key type.
 **Follow-ups / backlog only (not built):** KRL files (`RevokedKeys`);
 `ssh_config` parsing beyond `UserKnownHostsFile`; `VerifyHostKeyDNS`/SSHFP;
 `KnownHostsCommand`; IP-address matching; preferring known host key
-algorithms; an upstream SSH.NET docs contribution (warning that
+algorithms. (A drafted upstream SSH.NET docs contribution — warning that
 `HostKeyReceived` consumers must check certificate type/principals/CA, not
-just the CA fingerprint) — draft in `docs/upstream/`, undecided. (A second
-draft proposing SSH.NET expose the raw certificate bytes was scrapped: this
-library already gets them, via the public `ConnectionInfo.HostKeyAlgorithms`
-factories — see above — so there was no real ask left to make upstream.)
+just the CA fingerprint — isn't specific to this project, so it's tracked in
+the user's personal backlog instead of here; a companion draft proposing
+SSH.NET expose the raw certificate bytes was scrapped outright, since this
+library already gets them via the public `ConnectionInfo.HostKeyAlgorithms`
+factories — see above.)
 
 ### 18. Lab-topology cleanliness verification.
 

@@ -846,3 +846,36 @@ just the CA fingerprint) — draft in `docs/upstream/`, undecided. (A second
 draft proposing SSH.NET expose the raw certificate bytes was scrapped: this
 library already gets them, via the public `ConnectionInfo.HostKeyAlgorithms`
 factories — see above — so there was no real ask left to make upstream.)
+
+### 18. Lab-topology cleanliness verification.
+
+**Status: not started.** Before anything from this repo is published more
+broadly (story 19), audit everything checked in or emitted for real-lab
+specifics that shouldn't travel with a public package: hostnames
+(`srv-l-vm01`, `Win2019-Dev-Oni`, `srv-w-app01`, `srv-l-db01`), the account
+name (`tetsujinoni`), URIs, and any fingerprint/key material — across
+`docs/plan.md`/`docs/status.md`, test fixtures, and source comments. Real
+identifiers in *docs*, in prose explaining what was validated against, are
+fine and expected (see story 12, story 17); the concern is anything a
+published artifact would carry silently — package metadata, embedded
+resources, anything under `src/`. Expected outcome given how the repo is
+built (see story 17's fixture generation and story 11's Testcontainers
+approach): nothing, since real-infra specifics live only in docs and
+env-var-gated test parameters — but verify rather than assume before 19.
+
+### 19. Set up NuGet publishing.
+
+**Status: not started. Depends on story 18.** Today `avalonia-virt-manager`
+consumes this repo via a sibling `ProjectReference`
+(`..\..\..\netfx-libvirt\src\NetfxLibvirt\NetfxLibvirt.csproj`), not a
+package — see `docs/status.md`. Needs: package metadata on
+`NetfxLibvirt.csproj` (`PackageId`, `Authors`, `Description`, `RepositoryUrl`,
+license expression — already MIT, see the licensing commit — README/release
+notes inclusion), a version/release strategy, and a publish workflow
+(`.github/workflows/`, alongside the existing `publish-test-fixture-image.yml`
+pattern) pushing to NuGet.org gated on a tag or release, with the API key as
+a repo secret. Consider whether `SSH.NET`'s `BouncyCastle.Cryptography`
+transitive dependency needs calling out for consumers who care about that
+(this project's own stance: pure managed, no native interop — BouncyCastle is
+managed, so consistent with that, see the async-verifier commit's
+`docs/status.md` framing).

@@ -825,8 +825,10 @@ the Testcontainers fixture (every CA type × certified key type; trust-this-CA
 flow; wrong type/principal/CA/critical option/SHA-1; expired/not-yet-valid;
 plain-key TOFU/changed/revoked/CA-required; concurrent prompts; cancel while
 prompting); and an env-gated lab-host test (`LabHostOpenSshVerifierTests`,
-skips unless `NETFX_LIBVIRT_LAB_SSH_*` is set — still to be run against the real
-lab host). The security-critical logic was **mutation-checked** (13 mutations:
+skips unless `NETFX_LIBVIRT_LAB_SSH_*` is set — **run and passing against the
+real lab host**, `srv-l-vm01`, which presents an `ssh-ed25519-cert-v01@openssh.com`
+host certificate signed by an ECDSA CA, confirmed via `ssh -vvv`: exactly the
+motivating case). The security-critical logic was **mutation-checked** (13 mutations:
 CA-covers policy, changed-key type match, empty-principals, any-CA-accepted,
 revocation, post-lock re-evaluation, lock removal, negation veto, validity
 boundary, HOST-type, critical options, RawKey revocation, append newline — every

@@ -86,7 +86,13 @@ public sealed record SshTransportOptions
     /// <c>virt-ssh-helper</c> (e.g. <c>qemu:///system</c>) — identifies the
     /// driver/socket on the remote end. Resolved server-side by
     /// <c>virt-ssh-helper</c> itself, not sent as an RPC argument; see
-    /// <see cref="SshTransport"/>'s class doc. Unused by
-    /// <see cref="SshPortForward"/>.</summary>
+    /// <see cref="SshTransport"/>'s class doc. <see cref="SshTransport.ConnectAsync"/>
+    /// shell-quotes this before it ever reaches the remote exec command
+    /// (see <see cref="SshTransport.ShellQuote"/>'s doc — this is a value an
+    /// app is liable to let a user type or store, and unescaped shell
+    /// metacharacters in it would otherwise be remote code execution on the
+    /// libvirt host), so any string is safe to pass here regardless of
+    /// where it came from; it still must be a URI <c>virt-ssh-helper</c> can
+    /// actually resolve. Unused by <see cref="SshPortForward"/>.</summary>
     public required string RemoteUri { get; init; }
 }

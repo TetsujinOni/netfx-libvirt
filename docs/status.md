@@ -1,6 +1,6 @@
 # netfx-libvirt — Status
 
-**Last updated:** 2026-09-22 (`ssh_config` `Host` alias resolution landed — see "`ssh_config` `Host` alias resolution" below and plan story 20; OpenSSH-standard host verification — `known_hosts`, `@cert-authority` host certificates, `@revoked` — landed, see "OpenSSH host verification" below and plan story 17; async SSH host key verification landed — see "Completed" below; RPC streaming landed, and real remote graphics access via SSH port-forward — validated against a real domain's real VNC server, see "Completed" below; plan stories 1–11 done and validated against real infra — see `docs/plan.md`)
+**Last updated:** 2026-09-22 (fixed a real remote command-injection vulnerability via `RemoteUri` — see "`ssh_config` `Host` alias resolution"'s note below and plan story 21; `ssh_config` `Host` alias resolution landed — see "`ssh_config` `Host` alias resolution" below and plan story 20; OpenSSH-standard host verification — `known_hosts`, `@cert-authority` host certificates, `@revoked` — landed, see "OpenSSH host verification" below and plan story 17; async SSH host key verification landed — see "Completed" below; RPC streaming landed, and real remote graphics access via SSH port-forward — validated against a real domain's real VNC server, see "Completed" below; plan stories 1–11 done and validated against real infra — see `docs/plan.md`)
 
 ## What this is
 
@@ -368,6 +368,14 @@ public sealed record OpenSshConfigDiagnostic(string File, int Line, string Messa
   candidate. Pass `resolved.IdentityFiles` straight through — the library already filters ssh's own implicit
   default candidates to ones that exist; an explicitly configured `IdentityFile` is not filtered, so pre-check
   existence yourself if you pass one of those through directly. See `docs/plan.md` story 20's addendum.
+- **Security fix (`docs/plan.md` story 21): `SshTransportOptions.RemoteUri` is now safe to populate from
+  untrusted/user-editable input.** `SshTransport.ConnectAsync` previously built the remote exec command by raw
+  string interpolation of `RemoteUri` — any shell metacharacter in it was remote code execution on the libvirt
+  host. Reported by `avalonia-virt-manager`'s own security review once `RemoteUri` became a GUI-editable, saved
+  field (their host-profile work on top of story 20) rather than a developer-edited config value. Fixed with
+  proper POSIX shell quoting (`SshTransport.ShellQuote`, verified against a real shell). If you added any
+  client-side allow-list/validation on your saved URI as a stopgap for this, it's no longer load-bearing for
+  the injection itself — keep it only if you also want to reject malformed-but-shell-safe URIs early.
 
 ## Validation so far
 

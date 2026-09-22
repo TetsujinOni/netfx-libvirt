@@ -67,10 +67,36 @@ public static class SshTransport
     {
         var client = await ConnectClientAsync(options, cancellationToken).ConfigureAwait(false);
 
-        var command = client.CreateCommand($"virt-ssh-helper {options.RemoteUri}");
+        var command = client.CreateCommand($"virt-ssh-helper {ShellQuote(options.RemoteUri)}");
         _ = command.ExecuteAsync(cancellationToken);
 
         return new SshCommandDuplexStream(client, command);
+    }
+
+    /// <summary>
+    /// Quotes <paramref name="value"/> as a single, literal POSIX shell word (standard technique: wrap in
+    /// single quotes, and replace every embedded single quote with <c>'\''</c> — close the quote, an
+    /// escaped literal quote, reopen the quote). <c>CreateCommand</c> hands its whole string to SSH.NET,
+    /// which sends it as the payload of an SSH <c>exec</c> request; the server's <c>sshd</c> runs that
+    /// through the login shell (<c>sh -c "&lt;string&gt;"</c>), so <see cref="SshTransportOptions.RemoteUri"/>
+    /// landing there unescaped would let any shell metacharacter it contains (<c>;</c>, <c>|</c>, a
+    /// backtick, <c>$()</c>, …) run as an arbitrary command on the remote host, under whatever account the
+    /// SSH session authenticated as — remote code execution, and a real one: <c>RemoteUri</c> is exactly
+    /// the kind of value a consuming app is liable to let a user type or edit (e.g. a saved host profile),
+    /// not something this library can assume is already trustworthy. Quoting, not a character allow-list,
+    /// because a legitimate libvirt URI's query string can contain characters (<c>&amp;</c>, <c>=</c>, …)
+    /// an allow-list would either have to special-case or wrongly reject.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="value"/> contains a NUL character (not
+    /// representable on a real shell command line, and undefined once it reaches the wire).</exception>
+    internal static string ShellQuote(string value)
+    {
+        if (value.Contains('\0'))
+        {
+            throw new ArgumentException("Value contains a NUL character, which cannot appear in a shell command.", nameof(value));
+        }
+
+        return "'" + value.Replace("'", "'\\''") + "'";
     }
 
     /// <summary>The connect-and-verify path shared with <see cref="SshPortForward"/>:

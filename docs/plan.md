@@ -1,6 +1,6 @@
 # netfx-libvirt — Plan
 
-**Last updated:** 2026-09-22 (story 20, `ssh_config` `Host` alias resolution, done — see below; story 17, OpenSSH-standard host verification (`known_hosts` + host certificates), done — see below; story 16, async SSH host key verification, done — see below; story 15, RPC streaming / `DOMAIN_OPEN_GRAPHICS`, done hermetically — see below. Stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
+**Last updated:** 2026-09-22 (story 21, fixed a real remote command-injection vulnerability via `RemoteUri` — see below; story 20, `ssh_config` `Host` alias resolution, done — see below; story 17, OpenSSH-standard host verification (`known_hosts` + host certificates), done — see below; story 16, async SSH host key verification, done — see below; story 15, RPC streaming / `DOMAIN_OPEN_GRAPHICS`, done hermetically — see below. Stories 1–11 done and validated against real infra; story 11's fixture image published to GHCR and pulled by default, and its SSH library swapped to SSH.NET for real-account Ed25519 auth. Story 12's read-only slice is done against the real lab host; only Start/Shutdown/Destroy against a real host remains open, deliberately deferred — see that story below.)
 
 This is the living backlog. `docs/status.md` describes what's already built;
 this file is what's next, broken into small stories in dependency order.
@@ -1020,3 +1020,80 @@ ambiguous/password-fallback paths (using the real checked-in `host_ed25519`/
 `attacker_ed25519` fixture keys, not fakes). Mutation-checked (dropping the
 ambiguity check, dropping the existence filter, and disabling the fallback
 entirely were all initially uncaught — each got a test).
+
+### 21. Fix remote command injection via `RemoteUri` (`SshTransport.ShellQuote`).
+
+**Status: done — security fix, not a feature.** Reported by
+`avalonia-virt-manager` via its own security review of the host-profile
+work story 20/its addendum fed: `SshTransport.ConnectAsync` built the
+`virt-ssh-helper` exec command with raw string interpolation —
+`client.CreateCommand($"virt-ssh-helper {options.RemoteUri}")`. SSH.NET
+sends that string as the payload of an SSH `exec` request; the remote
+`sshd` runs it through the login shell. Any shell metacharacter in
+`RemoteUri` (`;`, `|`, a backtick, `$()`, `&&`, a newline, …) was therefore
+**remote code execution on the libvirt host**, under whatever account the
+SSH session authenticated as. This predates `ssh_config` resolution — it's
+been there since the original `virt-ssh-helper` transport (docs/plan.md
+story 11) — but story 20's own consumer widened the practical exposure:
+`RemoteUri` went from a single developer-edited config file to a
+GUI-editable, persisted field, meaning anyone with plain filesystem write
+access to that saved-hosts file (no SSH credentials needed) could plant a
+payload that executes the next time the user connects, using the user's own
+trusted session — a real trust-boundary crossing, not just a theoretical
+concern about a value only a developer ever typed.
+
+**Fix: proper POSIX shell quoting, not a character allow-list.**
+`SshTransport.ShellQuote` wraps the value in single quotes and replaces
+every embedded single quote with `'\''` (close quote, escaped literal
+quote, reopen quote) — the standard, complete technique for making an
+arbitrary string one literal shell word. An allow-list was considered and
+rejected (matching the reporter's own reasoning): a legitimate libvirt URI's
+query string can contain `&`, `=`, and other characters an allow-list would
+have to special-case or wrongly reject, where quoting neutralizes shell
+interpretation of *any* character without restricting which URIs are legal.
+`RemoteUri` containing a NUL character throws `ArgumentException` (not
+representable on a real command line, undefined once it reaches the wire).
+
+**Verification, at two levels — this is exactly a "don't reimplement/trust
+your own read of a subtle correctness property" situation
+(see [[feedback_no-agent-written-crypto-or-parsers]] in spirit, even though
+this isn't crypto: shell quoting has a long history of subtly-wrong
+"obviously correct" implementations), so it's checked against real tools,
+not just reasoned about:**
+
+1. **Hermetic, against a real POSIX shell as the oracle** — every quoted
+   value is round-tripped through `sh`/`bash` and compared byte-for-byte
+   against the original, for payloads shaped exactly like the exploit (`;`,
+   `$()`, a backtick, `&&`, `|`, redirects, an embedded literal newline,
+   single quotes in every position, NUL rejection). Two real pitfalls hit
+   writing these tests, **neither a bug in the fix itself**, both now
+   documented on the test class so they aren't rediscovered: (a) Windows has
+   no real argv — `ProcessStartInfo.ArgumentList` re-encodes it into one
+   command-line string via the MSVCRT backslash/quote convention, which
+   silently altered a payload mixing quotes and backslashes before the
+   POSIX shell ever saw it, so the oracle runs a script **file** instead,
+   whose bytes go through no such re-encoding; (b) `sh`/`bash`'s own
+   `printf` builtin applies backslash-escape processing to a `%s` argument
+   in practice (beyond what POSIX narrowly specifies), which would have
+   "proven" a correctly-quoted backslash-bearing value was mis-quoted — the
+   oracle instead compares via a shell variable and `[ = ]`, which does
+   byte-for-byte comparison with no escape processing at all.
+2. **A real end-to-end handshake against the Testcontainers `sshd`**: six
+   injection-shaped `RemoteUri` values (the same exploit shapes as the
+   hermetic tests, this time going through the real `SshTransport.ConnectAsync`
+   → SSH.NET `CreateCommand` → real SSH `exec` → real remote `sh`) are
+   confirmed to leave no trace on the container's filesystem, plus one test
+   confirming a legitimate `RemoteUri` still connects successfully through
+   the same code path (the fix must not regress the ordinary case). A
+   mutation-check (temporarily reverting to the raw-interpolation version)
+   was attempted but abandoned as inconclusive — background dotnet-test
+   tooling contention from running other builds concurrently, not the
+   vulnerable code, caused a hang/zero-tests-matched result; the hermetic
+   real-shell verification already gives high confidence independent of
+   that check, and 3 consecutive clean full-suite runs (466 tests, 0
+   failed) with the fix in place confirm no regression.
+
+**Not done:** the mutation-check above wasn't completed cleanly; if
+revisited, run it in isolation (no concurrent `dotnet build`/`test`
+invocations against the same `bin`/`obj` directories) so file-lock
+contention can't be mistaken for — or mask — a real hang.

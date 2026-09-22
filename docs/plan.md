@@ -838,6 +838,9 @@ are refused, and a CA signature algorithm must belong to the CA's key type.
 **Follow-ups / backlog only (not built):** KRL files (`RevokedKeys`);
 `ssh_config` parsing beyond `UserKnownHostsFile`; `VerifyHostKeyDNS`/SSHFP;
 `KnownHostsCommand`; IP-address matching; preferring known host key
-algorithms; upstream SSH.NET contributions (docs warning about
-type/principal/CA checks; exposing the raw certificate bytes) — drafts in
-`docs/upstream/`, undecided.
+algorithms; an upstream SSH.NET docs contribution (warning that
+`HostKeyReceived` consumers must check certificate type/principals/CA, not
+just the CA fingerprint) — draft in `docs/upstream/`, undecided. (A second
+draft proposing SSH.NET expose the raw certificate bytes was scrapped: this
+library already gets them, via the public `ConnectionInfo.HostKeyAlgorithms`
+factories — see above — so there was no real ask left to make upstream.)

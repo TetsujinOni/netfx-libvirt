@@ -1084,16 +1084,47 @@ not just reasoned about:**
    → SSH.NET `CreateCommand` → real SSH `exec` → real remote `sh`) are
    confirmed to leave no trace on the container's filesystem, plus one test
    confirming a legitimate `RemoteUri` still connects successfully through
-   the same code path (the fix must not regress the ordinary case). A
-   mutation-check (temporarily reverting to the raw-interpolation version)
-   was attempted but abandoned as inconclusive — background dotnet-test
-   tooling contention from running other builds concurrently, not the
-   vulnerable code, caused a hang/zero-tests-matched result; the hermetic
-   real-shell verification already gives high confidence independent of
-   that check, and 3 consecutive clean full-suite runs (466 tests, 0
-   failed) with the fix in place confirm no regression.
+   the same code path (the fix must not regress the ordinary case). The
+   mutation check this item originally described as "abandoned as
+   inconclusive (tooling contention)" was redone in isolation — see below;
+   the contention explanation turned out to be wrong.
 
-**Not done:** the mutation-check above wasn't completed cleanly; if
-revisited, run it in isolation (no concurrent `dotnet build`/`test`
-invocations against the same `bin`/`obj` directories) so file-lock
-contention can't be mistaken for — or mask — a real hang.
+**Mutation check, redone in isolation (2026-11-24, YouTrack lvw-15).** No
+other dotnet/MSBuild process alive, one `dotnet test` at a time, each
+mutation applied to `SshTransport.cs`, run, then restored with
+`git checkout`. The original hang was **not** contention — it reproduced in
+isolation, and it exposed three real weaknesses in the tests (not the fix)
+that a green suite had been hiding:
+
+| Mutation | Before | After the test fixes below |
+|---|---|---|
+| 1. `ConnectAsync` call site back to raw `{options.RemoteUri}` | integration theory **hung** (no red, no green) | 5 clean failures, 36s |
+| 2. `ShellQuote` returns the value unchanged | 15 failed, 4 *skipped* | killed (hermetic + integration) |
+| 3. `ShellQuote` drops only the `Replace("'", "'\\''")` | **1** failed, 4 *skipped*, the injection-proof test *passed* | 6 failed, 0 skipped, incl. the quote-breakout exploit |
+
+1. **A vulnerable remote command made the integration test hang instead of
+   fail.** Its "3-second bounded read" used a `CancellationToken`, which
+   SSH.NET's output `PipeStream` ignores — so the read only returned when
+   the remote end closed. True under the fix (garbage URI → `virt-ssh-helper`
+   exits), false under the vulnerability (valid `test:///default` prefix →
+   helper alive and silent). Now raced against `Task.Delay` instead. Bounding
+   it alone would have created a *false negative*: a trailing `; cmd` /
+   `&& cmd` / newline command only runs after the helper exits, so the test
+   now also disposes the stream (closing the helper's stdin) and polls for the
+   marker for up to 2s before concluding nothing ran.
+2. **A broken quote was reported as a skip, not a failure.** `RunScript`
+   returned `null` both for "no POSIX shell found" and "a shell ran and the
+   script failed" — and an unquoted `'` is a shell *syntax error*, so the four
+   single-quote round-trip cases silently skipped exactly when they were
+   needed. A shell that ran and failed now fails the test; only "no shell could
+   be started" skips.
+3. **The injection-proof test never exercised the exploit `'\''` exists to
+   stop.** Its payload contained no single quote, so naive `'…'` wrapping
+   passed it. Added `innocuous'; touch …; echo '` (hermetic, `Theory`) and
+   `'; touch …; echo '` (integration).
+
+Two integration payloads survive mutation 1, both expected rather than gaps:
+`&& touch` only runs if the helper exits 0 (it exits 1 on stdin EOF), and the
+quote-breakout payload is just a literal argument under *raw* interpolation
+(it exists for mutation 3). Final state: full suite 594 total, 0 failed,
+7 skipped (the existing environment-gated ones).

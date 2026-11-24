@@ -41,6 +41,8 @@ public class SshTransportShellQuoteIntegrationTests
         return result.ExitCode == 0;
     }
 
+    // The last shape closes ShellQuote's own wrapping quote early with a quote in the value — the exploit
+    // naive "wrap in '…'" quoting loses to (see SshTransportShellQuoteTests' matching case).
     [Theory]
     [InlineData("; touch /tmp/{0}")]
     [InlineData("$(touch /tmp/{0})")]
@@ -48,6 +50,7 @@ public class SshTransportShellQuoteIntegrationTests
     [InlineData("&& touch /tmp/{0}")]
     [InlineData("| touch /tmp/{0}")]
     [InlineData("\ntouch /tmp/{0}")]
+    [InlineData("'; touch /tmp/{0}; echo '")]
     public async Task MaliciousRemoteUri_NeverExecutesASecondCommand_OnARealRemoteHost(string payloadTemplate)
     {
         var marker = $"pwned-{Guid.NewGuid():N}";
@@ -59,19 +62,20 @@ public class SshTransportShellQuoteIntegrationTests
 
             // Whatever happens to the connection/protocol layer on top of a bogus URI (virt-ssh-helper
             // rejecting it, or the handshake simply never producing valid RPC bytes) isn't what's under
-            // test here — only whether a second shell command ran on the remote host is. Give the remote
-            // exec time to have run before checking.
-            try
-            {
-                var buffer = new byte[256];
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                _ = await stream.ReadAsync(buffer, timeout.Token);
-            }
-            catch (Exception)
-            {
-                // Expected in most cases: virt-ssh-helper can't make sense of the payload as a URI, or the
-                // channel closes. Irrelevant to this test either way.
-            }
+            // test here — only whether a second shell command ran on the remote host is.
+            //
+            // Race the read against a delay rather than a CancellationToken: SSH.NET's output PipeStream
+            // ignores the token, so a token-bounded read only returned when the remote end happened to close
+            // — true when ShellQuote works (garbage URI, helper exits), but not when it doesn't (the
+            // unquoted `test:///default` half is valid, the helper stays alive and silent, and this test hung
+            // instead of failing; found by a mutation check that reverted the call site to raw interpolation).
+            var read = stream.ReadAsync(new byte[256], CancellationToken.None).AsTask();
+            _ = read.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted); // observed, irrelevant
+            await Task.WhenAny(read, Task.Delay(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
+
+            // Leaving this scope disposes the stream, which closes the helper's stdin so it exits — and a
+            // trailing `; cmd` / `&& cmd` / newline-separated command only runs once the helper has exited,
+            // so the marker check below must come after that, not before.
         }
         catch (Exception)
         {
@@ -79,7 +83,18 @@ public class SshTransportShellQuoteIntegrationTests
             // cares that the injected command never ran.
         }
 
-        Assert.False(await MarkerExistsAsync(marker), $"'{maliciousUri}' executed a second command on the remote host — RemoteUri is not being shell-quoted.");
+        // Give a command released by the helper exiting a moment to run before concluding it never will.
+        var executed = false;
+        for (var i = 0; i < 8 && !executed; i++)
+        {
+            executed = await MarkerExistsAsync(marker);
+            if (!executed)
+            {
+                await Task.Delay(250, TestContext.Current.CancellationToken);
+            }
+        }
+
+        Assert.False(executed, $"'{maliciousUri}' executed a second command on the remote host — RemoteUri is not being shell-quoted.");
     }
 
     [Fact]

@@ -27,8 +27,12 @@ namespace NetfxLibvirt.Tests.Transport;
 public class SshTransportShellQuoteTests
 {
     /// <summary>Runs <paramref name="scriptBody"/> as a real POSIX shell script from a file (never a
-    /// command-line string) and returns exactly what it printed on stdout — <see langword="null"/> if no
-    /// POSIX shell is available (the caller should skip, not fail).</summary>
+    /// command-line string) and returns exactly what it printed on stdout — <see langword="null"/> only if
+    /// no POSIX shell could be started at all (the caller should skip). A shell that *did* start but exited
+    /// non-zero fails the test outright: that's what a script broken by bad quoting looks like (e.g. an
+    /// unterminated single quote is a shell syntax error), and treating it like "no shell" would silently
+    /// skip exactly the regressions these tests exist to catch — found by a mutation check that dropped
+    /// <c>ShellQuote</c>'s single-quote escaping and got 4 skips instead of 4 failures.</summary>
     private static string? RunScript(string scriptBody)
     {
         var directory = Directory.CreateTempSubdirectory("netfx-libvirt-shellquote-");
@@ -37,6 +41,7 @@ public class SshTransportShellQuoteTests
             var scriptPath = Path.Combine(directory.FullName, "script.sh");
             File.WriteAllText(scriptPath, scriptBody, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
+            string? lastFailure = null;
             foreach (var shell in new[] { "sh", "bash" })
             {
                 try
@@ -44,16 +49,25 @@ public class SshTransportShellQuoteTests
                     var psi = new ProcessStartInfo(shell) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
                     psi.ArgumentList.Add(scriptPath); // a plain path: no Windows argv/quote re-encoding to worry about
                     using var process = Process.Start(psi)!;
-                    var stdout = process.StandardOutput.ReadToEnd();
+                    var stdoutTask = process.StandardOutput.ReadToEndAsync();
+                    var stderr = process.StandardError.ReadToEnd();
+                    var stdout = stdoutTask.GetAwaiter().GetResult();
                     process.WaitForExit();
                     if (process.ExitCode == 0)
                     {
                         return stdout;
                     }
+
+                    lastFailure = $"{shell} exited {process.ExitCode}: {stderr.Trim()}";
                 }
                 catch (System.ComponentModel.Win32Exception)
                 {
                 }
+            }
+
+            if (lastFailure is not null)
+            {
+                Assert.Fail($"A POSIX shell ran the script but it failed — the quoted value didn't survive as valid shell. {lastFailure}");
             }
 
             return null;
@@ -132,12 +146,19 @@ public class SshTransportShellQuoteTests
         }
     }
 
-    [Fact]
-    public void ShellQuote_InjectionPayload_NeverExecutes_ProvenAgainstARealShell()
+    // Two shapes, because they defeat different wrong implementations: the first runs a second command if
+    // the value isn't quoted at all; the second contains its own single quote to close ShellQuote's wrapping
+    // quote early and run the command *outside* it — it defeats naive "wrap in '…'" quoting, the exact bug
+    // the '\'' replacement exists to prevent. A mutation check (drop only that Replace) passed the first
+    // shape and was caught by neither this test nor — via skips — the round-trip tests, until this was added.
+    [Theory]
+    [InlineData("innocuous; echo {0} > /dev/null; touch /tmp/{0}")]
+    [InlineData("innocuous'; touch /tmp/{0}; echo '")]
+    public void ShellQuote_InjectionPayload_NeverExecutes_ProvenAgainstARealShell(string payloadTemplate)
     {
         // The actual attack this fix closes: a payload that, unquoted, would run a second command.
         var marker = $"pwned-{Guid.NewGuid():N}";
-        var payload = $"innocuous; echo {marker} > /dev/null; touch /tmp/{marker}";
+        var payload = string.Format(payloadTemplate, marker);
         var quoted = SshTransport.ShellQuote(payload);
 
         var output = RunScript($"""

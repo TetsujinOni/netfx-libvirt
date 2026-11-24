@@ -97,9 +97,12 @@ public class SshTransportShellQuoteTests
     [InlineData("$(touch /tmp/pwned)")]
     [InlineData("`touch /tmp/pwned`")]
     [InlineData("a && touch /tmp/pwned")]
-    [InlineData("a | rm -rf /")]
-    [InlineData("a > /etc/passwd")]
-    [InlineData("a < /etc/passwd")]
+    // Pipe/redirect shapes use marker paths, not `rm -rf /` or `> /etc/passwd`: if quoting ever regresses,
+    // these run for real in a local shell (a mutation check did exactly that), and a failed assertion is the
+    // only acceptable failure mode — never a destructive one.
+    [InlineData("a | touch /tmp/pwned-pipe")]
+    [InlineData("a > /tmp/pwned-redirect")]
+    [InlineData("a < /tmp/pwned-input")]
     [InlineData("$RANDOM$USER${PATH}")]
     [InlineData("a\nb")] // embedded newline: must stay part of ONE argument, not become a second command
     [InlineData("a\tb")]
